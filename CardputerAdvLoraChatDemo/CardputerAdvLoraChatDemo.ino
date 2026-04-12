@@ -36,6 +36,7 @@ volatile bool g_rx_flag = false;
 volatile bool g_tx_flag = false;
 
 bool g_radio_ready = false;
+bool g_needs_redraw = true;
 String g_input_line;
 String g_last_status = "Booting...";
 String g_last_metrics = "-";
@@ -57,6 +58,7 @@ void push_log(const String& line) {
     g_log_lines[i] = g_log_lines[i + 1];
   }
   g_log_lines[LOG_LINE_COUNT - 1] = line;
+  g_needs_redraw = true;
   Serial.println(line);
 }
 
@@ -88,6 +90,7 @@ void start_receive() {
   int16_t state = radio.startReceive();
   if (state == RADIOLIB_ERR_NONE) {
     g_last_status = "Listening";
+    g_needs_redraw = true;
   } else {
     g_last_status = "RX error " + String(state);
     push_log("RX start failed: " + String(state));
@@ -135,6 +138,7 @@ void send_message(const String& message) {
   int16_t state = radio.startTransmit(tx_message);
   if (state == RADIOLIB_ERR_NONE) {
     g_last_status = "Sending";
+    g_needs_redraw = true;
     push_log("TX> " + message);
   } else {
     g_last_status = "TX error " + String(state);
@@ -152,6 +156,7 @@ void handle_radio_events() {
     if (state == RADIOLIB_ERR_NONE) {
       g_last_status = "Message received";
       g_last_metrics = "RSSI " + String(radio.getRSSI(), 1) + " dBm / SNR " + String(radio.getSNR(), 1) + " dB";
+      g_needs_redraw = true;
       push_log("RX> " + incoming);
     } else {
       g_last_status = "RX read error " + String(state);
@@ -163,6 +168,7 @@ void handle_radio_events() {
   if (g_tx_flag) {
     g_tx_flag = false;
     g_last_status = "Sent";
+    g_needs_redraw = true;
     start_receive();
   }
 }
@@ -182,10 +188,12 @@ void handle_serial_input() {
     }
     if ((c == '\b' || c == 127) && g_input_line.length() > 0) {
       g_input_line.remove(g_input_line.length() - 1);
+      g_needs_redraw = true;
       continue;
     }
     if (c >= 32 && c <= 126 && g_input_line.length() < 48) {
       g_input_line += c;
+      g_needs_redraw = true;
     }
   }
 }
@@ -210,6 +218,7 @@ void setup() {
   }
 
   draw_ui();
+  g_needs_redraw = false;
 }
 
 void loop() {
@@ -223,10 +232,8 @@ void loop() {
     send_message("ping " + String(g_ping_counter));
   }
 
-  static uint32_t next_draw = 0;
-  uint32_t now = millis();
-  if (now >= next_draw) {
-    next_draw = now + 100;
+  if (g_needs_redraw) {
     draw_ui();
+    g_needs_redraw = false;
   }
 }

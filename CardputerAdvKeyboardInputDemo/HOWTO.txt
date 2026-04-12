@@ -1,0 +1,14 @@
+Arduino IDE 2.x:
+- `CardputerAdv-playground\CardputerAdvKeyboardInputDemo\CardputerAdvKeyboardInputDemo.ino` を開く
+- ボード: M5Stack Cardputer / Cardputer ADV 系 (`m5stack:esp32:m5stack_cardputer`)
+- 必要な外部ライブラリ:
+  - M5Unified
+  - Adafruit TCA8418 **1.0.2**
+
+使い方:
+- Cardputer ADV 本体キーボードで文字入力
+- Enter で現在の行を確定して履歴へ移動
+- BtnA で入力内容と履歴をクリア
+
+メモ:
+- `Adafruit TCA8418` の依存として `Adafruit BusIO` も Arduino IDE 側で入れてください
