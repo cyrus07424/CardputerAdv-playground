@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <M5Unified.h>
+#include <M5Cardputer.h>
 #include <SPI.h>
 #include <RadioLib.h>
 
@@ -63,7 +63,7 @@ void push_log(const String& line) {
 }
 
 void draw_ui() {
-  auto& display = M5.Display;
+  auto& display = M5Cardputer.Display;
   display.startWrite();
   display.fillScreen(TFT_BLACK);
   display.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -203,11 +203,11 @@ void setup() {
   cfg.serial_baudrate = 115200;
   cfg.clear_display = true;
   cfg.output_power = true;
-  M5.begin(cfg);
+  M5Cardputer.begin(cfg, false);
 
-  M5.Display.setRotation(1);
-  M5.Display.setTextSize(1);
-  M5.Display.setTextFont(1);
+  M5Cardputer.Display.setRotation(1);
+  M5Cardputer.Display.setTextSize(1);
+  M5Cardputer.Display.setTextFont(1);
 
   push_log("Booting");
   push_log("Open Serial @115200");
@@ -222,12 +222,12 @@ void setup() {
 }
 
 void loop() {
-  M5.update();
+  M5Cardputer.update();
 
   handle_serial_input();
   handle_radio_events();
 
-  if (M5.BtnA.wasClicked()) {
+  if (M5Cardputer.BtnA.wasClicked()) {
     ++g_ping_counter;
     send_message("ping " + String(g_ping_counter));
   }

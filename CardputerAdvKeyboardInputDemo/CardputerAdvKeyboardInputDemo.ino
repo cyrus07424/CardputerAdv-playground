@@ -1,84 +1,19 @@
 #include <Arduino.h>
-#include <M5Unified.h>
-#include <Wire.h>
-#include <Adafruit_TCA8418.h>
+#include <M5Cardputer.h>
 
-enum class KeyType : uint8_t {
-  Printable,
-  Backspace,
-  Enter,
-  Shift,
-  CapsLock,
-  Ignored,
-};
-
-namespace board_pins {
-constexpr int I2C_SDA = 8;
-constexpr int I2C_SCL = 9;
-}
-
-struct KeyCell {
-  KeyType type;
-  char base;
-  char shifted;
-  const char* label;
-};
-
-constexpr KeyCell KEYMAP[4][14] = {
-    {
-        {KeyType::Printable, '`', '~', "`"}, {KeyType::Printable, '1', '!', "1"},
-        {KeyType::Printable, '2', '@', "2"}, {KeyType::Printable, '3', '#', "3"},
-        {KeyType::Printable, '4', '$', "4"}, {KeyType::Printable, '5', '%', "5"},
-        {KeyType::Printable, '6', '^', "6"}, {KeyType::Printable, '7', '&', "7"},
-        {KeyType::Printable, '8', '*', "8"}, {KeyType::Printable, '9', '(', "9"},
-        {KeyType::Printable, '0', ')', "0"}, {KeyType::Printable, '-', '_', "-"},
-        {KeyType::Printable, '=', '+', "="}, {KeyType::Backspace, 0, 0, "del"},
-    },
-    {
-        {KeyType::Ignored, '\t', '\t', "tab"}, {KeyType::Printable, 'q', 'Q', "q"},
-        {KeyType::Printable, 'w', 'W', "w"},   {KeyType::Printable, 'e', 'E', "e"},
-        {KeyType::Printable, 'r', 'R', "r"},   {KeyType::Printable, 't', 'T', "t"},
-        {KeyType::Printable, 'y', 'Y', "y"},   {KeyType::Printable, 'u', 'U', "u"},
-        {KeyType::Printable, 'i', 'I', "i"},   {KeyType::Printable, 'o', 'O', "o"},
-        {KeyType::Printable, 'p', 'P', "p"},   {KeyType::Printable, '[', '{', "["},
-        {KeyType::Printable, ']', '}', "]"},   {KeyType::Printable, '\\', '|', "\\"},
-    },
-    {
-        {KeyType::Shift, 0, 0, "shift"},         {KeyType::CapsLock, 0, 0, "caps"},
-        {KeyType::Printable, 'a', 'A', "a"},     {KeyType::Printable, 's', 'S', "s"},
-        {KeyType::Printable, 'd', 'D', "d"},     {KeyType::Printable, 'f', 'F', "f"},
-        {KeyType::Printable, 'g', 'G', "g"},     {KeyType::Printable, 'h', 'H', "h"},
-        {KeyType::Printable, 'j', 'J', "j"},     {KeyType::Printable, 'k', 'K', "k"},
-        {KeyType::Printable, 'l', 'L', "l"},     {KeyType::Printable, ';', ':', ";"},
-        {KeyType::Printable, '\'', '\"', "'"},   {KeyType::Enter, 0, 0, "enter"},
-    },
-    {
-        {KeyType::Ignored, 0, 0, "ctrl"},      {KeyType::Ignored, 0, 0, "opt"},
-        {KeyType::Ignored, 0, 0, "alt"},       {KeyType::Printable, 'z', 'Z', "z"},
-        {KeyType::Printable, 'x', 'X', "x"},   {KeyType::Printable, 'c', 'C', "c"},
-        {KeyType::Printable, 'v', 'V', "v"},   {KeyType::Printable, 'b', 'B', "b"},
-        {KeyType::Printable, 'n', 'N', "n"},   {KeyType::Printable, 'm', 'M', "m"},
-        {KeyType::Printable, ',', '<', ","},   {KeyType::Printable, '.', '>', "."},
-        {KeyType::Printable, '/', '?', "/"},   {KeyType::Printable, ' ', ' ', "space"},
-    },
-};
-
-Adafruit_TCA8418 keyboard;
-
-bool g_keyboard_ready = false;
-bool g_shift_pressed = false;
-bool g_caps_locked = false;
-bool g_needs_redraw = true;
 String g_current_line;
-
-constexpr size_t HISTORY_LINES = 6;
-String g_history[HISTORY_LINES];
+String g_history[6];
+String g_prev_pressed_chars;
+bool g_prev_backspace = false;
+bool g_prev_enter = false;
+bool g_shift_active = false;
+bool g_needs_redraw = true;
 
 void push_history(const String& line) {
-  for (size_t i = 0; i + 1 < HISTORY_LINES; ++i) {
+  for (size_t i = 0; i + 1 < 6; ++i) {
     g_history[i] = g_history[i + 1];
   }
-  g_history[HISTORY_LINES - 1] = line;
+  g_history[5] = line;
 }
 
 String tail_text(const String& text, size_t max_len) {
@@ -88,107 +23,29 @@ String tail_text(const String& text, size_t max_len) {
   return text.substring(text.length() - max_len);
 }
 
-bool decode_key_event(uint8_t raw, bool& pressed, uint8_t& mapped_row, uint8_t& mapped_col) {
-  if (raw == 0) {
-    return false;
-  }
-
-  pressed = (raw & 0x80) != 0;
-  uint8_t value = raw & 0x7F;
-  if (value == 0) {
-    return false;
-  }
-
-  value--;
-  uint8_t row = value / 10;
-  uint8_t col = value % 10;
-
-  uint8_t remapped_col = row * 2;
-  if (col > 3) {
-    remapped_col++;
-  }
-  uint8_t remapped_row = (col + 4) % 4;
-
-  if (remapped_row >= 4 || remapped_col >= 14) {
-    return false;
-  }
-
-  mapped_row = remapped_row;
-  mapped_col = remapped_col;
-  return true;
+bool is_special_key(char key) {
+  return key == KEY_FN || key == KEY_LEFT_SHIFT || key == KEY_LEFT_CTRL ||
+         key == KEY_LEFT_ALT || key == KEY_OPT || key == KEY_ENTER ||
+         key == KEY_BACKSPACE || key == KEY_TAB;
 }
 
-char select_printable_char(const KeyCell& cell) {
-  bool shifted = g_shift_pressed;
-  if (cell.base >= 'a' && cell.base <= 'z') {
-    shifted = g_shift_pressed || g_caps_locked;
-  }
-  return shifted ? cell.shifted : cell.base;
-}
+String collect_pressed_chars(const Keyboard_Class::KeysState& status) {
+  String result;
+  bool shifted = status.fn || status.shift;
 
-void handle_key_event(uint8_t raw) {
-  bool pressed = false;
-  uint8_t row = 0;
-  uint8_t col = 0;
-  if (!decode_key_event(raw, pressed, row, col)) {
-    return;
-  }
-
-  const KeyCell& key = KEYMAP[row][col];
-
-  if (key.type == KeyType::Shift) {
-    g_shift_pressed = pressed;
-    g_needs_redraw = true;
-    return;
-  }
-
-  if (key.type == KeyType::CapsLock) {
-    if (pressed) {
-      g_caps_locked = !g_caps_locked;
-      g_needs_redraw = true;
+  for (const auto& key_pos : M5Cardputer.Keyboard.keyList()) {
+    const auto key_value = M5Cardputer.Keyboard.getKeyValue(key_pos);
+    if (is_special_key(key_value.value_first)) {
+      continue;
     }
-    return;
+
+    result += shifted ? key_value.value_second : key_value.value_first;
   }
-
-  if (!pressed) {
-    return;
-  }
-
-  switch (key.type) {
-    case KeyType::Printable:
-      if (g_current_line.length() < 80) {
-        g_current_line += select_printable_char(key);
-        g_needs_redraw = true;
-      }
-      break;
-
-    case KeyType::Backspace:
-      if (g_current_line.length() > 0) {
-        g_current_line.remove(g_current_line.length() - 1);
-        g_needs_redraw = true;
-      }
-      break;
-
-    case KeyType::Enter:
-      push_history(g_current_line);
-      g_current_line = "";
-      g_needs_redraw = true;
-      break;
-
-    case KeyType::Ignored:
-      if (key.base == '\t' && g_current_line.length() < 79) {
-        g_current_line += "  ";
-        g_needs_redraw = true;
-      }
-      break;
-
-    default:
-      break;
-  }
+  return result;
 }
 
 void draw_ui() {
-  auto& display = M5.Display;
+  auto& display = M5Cardputer.Display;
   display.startWrite();
   display.fillScreen(TFT_BLACK);
   display.setTextFont(1);
@@ -200,7 +57,7 @@ void draw_ui() {
   display.println("Type on built-in keyboard");
   display.println("Enter: commit / BtnA: clear");
   display.setTextColor(TFT_YELLOW, TFT_BLACK);
-  display.printf("Shift:%s  Caps:%s\n", g_shift_pressed ? "ON " : "OFF", g_caps_locked ? "ON" : "OFF");
+  display.printf("Shift:%s\n", g_shift_active ? "ON" : "OFF");
   display.println("------------------------------");
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.printf("> %s\n", tail_text(g_current_line, 28).c_str());
@@ -211,45 +68,58 @@ void draw_ui() {
   display.endWrite();
 }
 
-bool init_keyboard() {
-  Wire.begin(board_pins::I2C_SDA, board_pins::I2C_SCL);
-  if (!keyboard.begin(TCA8418_DEFAULT_ADDR, &Wire)) {
-    return false;
+void handle_keyboard() {
+  if (!M5Cardputer.Keyboard.isChange()) {
+    return;
   }
-  keyboard.matrix(7, 8);
-  keyboard.flush();
-  return true;
+
+  const auto status = M5Cardputer.Keyboard.keysState();
+  g_shift_active = status.fn || status.shift;
+
+  const String pressed_chars = collect_pressed_chars(status);
+  for (size_t i = 0; i < pressed_chars.length(); ++i) {
+    const char c = pressed_chars[i];
+    if (g_prev_pressed_chars.indexOf(c) < 0 && g_current_line.length() < 80) {
+      g_current_line += c;
+      g_needs_redraw = true;
+    }
+  }
+
+  if (status.del && !g_prev_backspace && g_current_line.length() > 0) {
+    g_current_line.remove(g_current_line.length() - 1);
+    g_needs_redraw = true;
+  }
+
+  if (status.enter && !g_prev_enter) {
+    push_history(g_current_line);
+    g_current_line = "";
+    g_needs_redraw = true;
+  }
+
+  g_prev_pressed_chars = pressed_chars;
+  g_prev_backspace = status.del;
+  g_prev_enter = status.enter;
+  g_needs_redraw = true;
 }
 
 void setup() {
   auto cfg = M5.config();
   cfg.serial_baudrate = 115200;
   cfg.clear_display = true;
-  M5.begin(cfg);
+  M5Cardputer.begin(cfg, true);
 
-  M5.Display.setRotation(1);
-  g_keyboard_ready = init_keyboard();
-
-  if (!g_keyboard_ready) {
-    push_history("Keyboard init failed");
-  } else {
-    push_history("Keyboard ready");
-  }
-
+  M5Cardputer.Display.setRotation(1);
+  push_history("Keyboard ready");
   draw_ui();
   g_needs_redraw = false;
 }
 
 void loop() {
-  M5.update();
+  M5Cardputer.update();
 
-  if (g_keyboard_ready) {
-    while (keyboard.available() > 0) {
-      handle_key_event(keyboard.getEvent());
-    }
-  }
+  handle_keyboard();
 
-  if (M5.BtnA.wasClicked()) {
+  if (M5Cardputer.BtnA.wasClicked()) {
     g_current_line = "";
     for (auto& line : g_history) {
       line = "";
