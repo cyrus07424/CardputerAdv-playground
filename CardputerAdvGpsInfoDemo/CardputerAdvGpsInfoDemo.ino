@@ -1,16 +1,23 @@
 #include <Arduino.h>
 #include <M5Cardputer.h>
 #include <TinyGPS++.h>
+#include <SPI.h>
+#include <SD.h>
 #include <math.h>
 
 namespace board_pins {
 constexpr int GPS_RX = 15;
 constexpr int GPS_TX = 13;
+constexpr int SD_SCK = 40;
+constexpr int SD_MISO = 39;
+constexpr int SD_MOSI = 14;
+constexpr int SD_CS = 12;
 }
 
 namespace gps_config {
 constexpr uint32_t UART_BAUD = 115200;
 constexpr uint32_t UI_REFRESH_MS = 1000;
+constexpr uint32_t SD_RETRY_MS = 3000;
 constexpr float SPEED_MAX_KMH = 120.0f;
 }
 
@@ -24,11 +31,17 @@ enum class DisplayMode : uint8_t {
 
 HardwareSerial GPSSerial(1);
 TinyGPSPlus gps;
+File g_log_file;
 
 bool g_needs_redraw = true;
+bool g_sd_ready = false;
 String g_status = "Booting...";
+String g_log_path;
+String g_nmea_sentence;
 uint32_t g_last_draw_ms = 0;
 uint32_t g_last_data_ms = 0;
+uint32_t g_last_sd_check_ms = 0;
+uint32_t g_logged_sentence_count = 0;
 DisplayMode g_display_mode = DisplayMode::Text;
 
 String format_float_value(bool valid, double value, uint8_t decimals) {
@@ -117,10 +130,143 @@ float speed_kmph() {
   return gps.speed.isValid() ? gps.speed.kmph() : 0.0f;
 }
 
+bool has_gps_fix() {
+  return gps.location.isValid() && satellite_count() > 0;
+}
+
+String log_status_text() {
+  if (!g_sd_ready) {
+    return "No SD";
+  }
+  if (!has_gps_fix()) {
+    return "Standby";
+  }
+  if (g_log_file) {
+    return "REC";
+  }
+  return "Ready";
+}
+
+String log_path_label() {
+  if (g_log_path.length() == 0) {
+    return "-";
+  }
+  const int slash = g_log_path.lastIndexOf('/');
+  return slash >= 0 ? g_log_path.substring(slash + 1) : g_log_path;
+}
+
 const char* heading_label(double degrees) {
   static const char* labels[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
   const int index = static_cast<int>((degrees + 22.5) / 45.0) % 8;
   return labels[index];
+}
+
+void close_log_file() {
+  if (g_log_file) {
+    g_log_file.flush();
+    g_log_file.close();
+  }
+}
+
+String build_log_path() {
+  char buffer[48];
+  if (gps.date.isValid() && gps.time.isValid()) {
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "/gps_%04d%02d%02d_%02d%02d%02d.nmea",
+        gps.date.year(),
+        gps.date.month(),
+        gps.date.day(),
+        gps.time.hour(),
+        gps.time.minute(),
+        gps.time.second());
+  } else {
+    snprintf(buffer, sizeof(buffer), "/gps_%lu.nmea", millis() / 1000UL);
+  }
+  return String(buffer);
+}
+
+bool init_sd_card() {
+  SPI.begin(board_pins::SD_SCK, board_pins::SD_MISO, board_pins::SD_MOSI, board_pins::SD_CS);
+  if (!SD.begin(board_pins::SD_CS, SPI, 25000000)) {
+    g_sd_ready = false;
+    close_log_file();
+    return false;
+  }
+  if (SD.cardType() == CARD_NONE) {
+    g_sd_ready = false;
+    close_log_file();
+    return false;
+  }
+
+  g_sd_ready = true;
+  g_needs_redraw = true;
+  return true;
+}
+
+void ensure_sd_card() {
+  if (g_sd_ready) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (now - g_last_sd_check_ms < gps_config::SD_RETRY_MS) {
+    return;
+  }
+  g_last_sd_check_ms = now;
+  init_sd_card();
+}
+
+bool open_log_file_if_needed() {
+  if (!g_sd_ready) {
+    return false;
+  }
+  if (g_log_file) {
+    return true;
+  }
+
+  g_log_path = build_log_path();
+  g_log_file = SD.open(g_log_path.c_str(), FILE_APPEND);
+  if (!g_log_file) {
+    g_sd_ready = false;
+    g_log_path = "";
+    g_needs_redraw = true;
+    return false;
+  }
+
+  g_needs_redraw = true;
+  return true;
+}
+
+void append_nmea_log(const String& sentence) {
+  if (!g_sd_ready || !has_gps_fix() || sentence.length() == 0 || sentence[0] != '$') {
+    return;
+  }
+  if (!open_log_file_if_needed()) {
+    return;
+  }
+
+  const size_t expected_bytes = sentence.length() + 2;
+  size_t written_bytes = g_log_file.print(sentence);
+  written_bytes += g_log_file.print("\r\n");
+  g_log_file.flush();
+
+  if (written_bytes < expected_bytes) {
+    close_log_file();
+    g_sd_ready = false;
+    g_log_path = "";
+    g_needs_redraw = true;
+    return;
+  }
+
+  ++g_logged_sentence_count;
+  g_needs_redraw = true;
+}
+
+void handle_completed_nmea_sentence() {
+  append_nmea_log(g_nmea_sentence);
+  g_nmea_sentence = "";
 }
 
 void draw_battery_status(int width) {
@@ -155,7 +301,7 @@ void update_status() {
 
   if (g_last_data_ms == 0 || now - g_last_data_ms > 3000) {
     next_status = "No GPS data";
-  } else if (gps.location.isValid()) {
+  } else if (has_gps_fix()) {
     next_status = "GPS fix";
   } else if (gps.charsProcessed() > 0) {
     next_status = "Searching satellites";
@@ -205,7 +351,8 @@ void draw_text_mode() {
   display.printf("Spd : %s km/h\n", format_float_value(gps.speed.isValid(), gps.speed.kmph(), 1).c_str());
   display.printf("Crs : %s deg\n", format_float_value(gps.course.isValid(), gps.course.deg(), 1).c_str());
   display.printf("UTC : %s\n", format_date_time().c_str());
-  display.printf("Age : %s\n", format_fix_age().c_str());
+  display.printf("Log : %s %lu\n", log_status_text().c_str(), static_cast<unsigned long>(g_logged_sentence_count));
+  display.printf("File: %s\n", log_path_label().c_str());
 }
 
 void draw_satellite_mode() {
@@ -238,7 +385,7 @@ void draw_satellite_mode() {
   display.setCursor(16, 96);
   display.printf("HDOP: %s", format_float_value(gps.hdop.isValid(), gps.hdop.hdop(), 1).c_str());
   display.setCursor(16, 108);
-  display.printf("Fix : %s", gps.location.isValid() ? "YES" : "NO");
+  display.printf("Fix : %s", has_gps_fix() ? "YES" : "NO");
 }
 
 void draw_compass_mode() {
@@ -361,6 +508,7 @@ void setup() {
   M5Cardputer.Display.setTextSize(1);
 
   GPSSerial.begin(gps_config::UART_BAUD, SERIAL_8N1, board_pins::GPS_RX, board_pins::GPS_TX);
+  init_sd_card();
 
   Serial.println("Cardputer ADV GPS demo started");
   Serial.println("GNSS UART: RX=15 TX=13 @115200");
@@ -373,12 +521,26 @@ void setup() {
 
 void loop() {
   M5Cardputer.update();
+  ensure_sd_card();
 
   bool received_data = false;
   while (GPSSerial.available() > 0) {
     const char c = static_cast<char>(GPSSerial.read());
     gps.encode(c);
     received_data = true;
+
+    if (c == '\r') {
+      continue;
+    }
+    if (c == '\n') {
+      handle_completed_nmea_sentence();
+      continue;
+    }
+    if (g_nmea_sentence.length() < 120) {
+      g_nmea_sentence += c;
+    } else {
+      g_nmea_sentence = "";
+    }
   }
 
   if (received_data) {
