@@ -121,7 +121,7 @@ constexpr int INFO_TOP_Y = 22;
 constexpr int LIST_TOP_Y = 44;
 constexpr int ROW_HEIGHT = 11;
 constexpr int ROW_GAP = 2;
-constexpr size_t VISIBLE_NETWORKS = 5;
+constexpr size_t VISIBLE_NETWORKS = 6;
 constexpr int BLUETOOTH_LIST_TOP_Y = 34;
 constexpr size_t VISIBLE_BLUETOOTH = 7;
 }
@@ -465,6 +465,28 @@ size_t visible_explorer_entries() {
 size_t max_text_scroll_offset(size_t line_count) {
   const size_t visible_lines = visible_text_line_count();
   return line_count > visible_lines ? line_count - visible_lines : 0;
+}
+
+size_t text_mode_line_count() {
+  size_t line_count = 0;
+  line_count += 1;  // Lat
+  line_count += 1;  // Lng
+  line_count += 1;  // Alt
+  line_count += 1;  // Sat/HDOP
+  line_count += 1;  // Speed
+  line_count += 1;  // Course
+  line_count += 1;  // UTC
+  line_count += 1;  // GPS log status
+  line_count += 1;  // LoRa status
+  line_count += 1;  // Counters
+  line_count += 1;  // JSONL count
+  line_count += 1;  // GNSS mode
+  line_count += 1;  // GNSS version
+  line_count += 1;  // WiFi / BT
+  line_count += 1;  // GPS file
+  line_count += 1;  // LoRa file
+  line_count += 1;  // JSONL file
+  return line_count;
 }
 
 void draw_vertical_scrollbar(int x, int top_y, int height, size_t total_items, size_t visible_items, size_t offset) {
@@ -1939,7 +1961,7 @@ void handle_keyboard_input() {
 
   if (g_app_mode == AppMode::Harvest) {
     if (g_display_mode == DisplayMode::Text) {
-      const size_t text_line_count = 12;
+      const size_t text_line_count = text_mode_line_count();
       const size_t max_scroll = max_text_scroll_offset(text_line_count);
       if (move_up && g_text_scroll_offset > 0) {
         --g_text_scroll_offset;
