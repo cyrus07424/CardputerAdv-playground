@@ -10,6 +10,37 @@
 #include <esp_mac.h>
 #include <math.h>
 
+#ifndef BUILD_ENABLE_USB_STORAGE
+#define BUILD_ENABLE_USB_STORAGE 1
+#endif
+#ifndef BUILD_ENABLE_WIFI_SCAN
+#define BUILD_ENABLE_WIFI_SCAN 1
+#endif
+#ifndef BUILD_ENABLE_BLE_SCAN
+#define BUILD_ENABLE_BLE_SCAN 0
+#endif
+#ifndef BUILD_ENABLE_JSONL_LOG
+#define BUILD_ENABLE_JSONL_LOG 1
+#endif
+
+#if BUILD_ENABLE_BLE_SCAN
+#include <BLEDevice.h>
+#include <esp32-hal-bt.h>
+
+extern "C" {
+#include <esp_bt_main.h>
+#include <esp_gap_ble_api.h>
+}
+#endif
+
+// Build-time feature switches. Set 0/1 here before compiling.
+// Recommended first trims when flash gets tight:
+// 1. BUILD_ENABLE_BLE_SCAN
+// 2. BUILD_ENABLE_USB_STORAGE
+// 3. BUILD_ENABLE_WIFI_SCAN
+// 4. BUILD_ENABLE_JSONL_LOG
+// Note: BUILD_ENABLE_BLE_SCAN remains experimental on the current Arduino core.
+
 namespace board_pins {
 constexpr int GPS_RX = 15;
 constexpr int GPS_TX = 13;
@@ -38,8 +69,11 @@ constexpr size_t QUERY_LINE_MAX_LEN = 127;
 namespace harvest_log_config {
 constexpr uint32_t SNAPSHOT_INTERVAL_MS = 5000;
 constexpr uint32_t WIFI_SCAN_INTERVAL_MS = 30000;
+constexpr uint32_t BLE_SCAN_INTERVAL_MS = 30000;
+constexpr uint32_t BLE_SCAN_DURATION_S = 4;
 constexpr uint16_t WIFI_SCAN_MAX_MS_PER_CHANNEL = 40;
 constexpr size_t MAX_WIFI_RESULTS = 12;
+constexpr size_t MAX_BLE_RESULTS = 8;
 }
 
 namespace lora_config {
@@ -82,6 +116,16 @@ constexpr int TOP_Y = 22;
 constexpr int LINE_HEIGHT = 10;
 }
 
+namespace wireless_mode_config {
+constexpr int INFO_TOP_Y = 22;
+constexpr int LIST_TOP_Y = 44;
+constexpr int ROW_HEIGHT = 11;
+constexpr int ROW_GAP = 2;
+constexpr size_t VISIBLE_NETWORKS = 5;
+constexpr int BLUETOOTH_LIST_TOP_Y = 34;
+constexpr size_t VISIBLE_BLUETOOTH = 7;
+}
+
 namespace keyboard_hid {
 constexpr uint8_t ESC = 0x29;
 constexpr uint8_t RIGHT = 0x4F;
@@ -94,6 +138,8 @@ enum class DisplayMode : uint8_t {
   Text = 0,
   Satellites,
   SignalBars,
+  Wireless,
+  Bluetooth,
   Compass,
   Speed,
   Count
@@ -123,6 +169,13 @@ struct WifiScanResult {
   wifi_auth_mode_t encryption = WIFI_AUTH_OPEN;
 };
 
+struct BluetoothScanResult {
+  String name;
+  String address;
+  int32_t rssi = 0;
+  uint32_t last_seen_ms = 0;
+};
+
 HardwareSerial GPSSerial(1);
 TinyGPSPlus gps;
 SX1262 radio = new Module(
@@ -132,7 +185,9 @@ SX1262 radio = new Module(
     board_pins::LORA_BUSY,
     SPI);
 M5Canvas g_canvas(&M5Cardputer.Display);
+#if BUILD_ENABLE_USB_STORAGE
 USBMSC g_usb_msc;
+#endif
 File g_gps_log_file;
 File g_lora_log_file;
 File g_jsonl_log_file;
@@ -145,6 +200,9 @@ bool g_beep_enabled = true;
 bool g_prev_fn_pressed = false;
 bool g_usb_started = false;
 bool g_usb_storage_active = false;
+bool g_ble_ready = false;
+bool g_ble_scan_configured = false;
+bool g_ble_scan_active = false;
 String g_status = "Booting...";
 String g_gps_log_path;
 String g_lora_log_path;
@@ -162,15 +220,20 @@ uint32_t g_last_gnss_info_ms = 0;
 uint32_t g_last_sd_check_ms = 0;
 uint32_t g_last_json_snapshot_ms = 0;
 uint32_t g_last_wifi_scan_ms = 0;
+uint32_t g_last_ble_scan_ms = 0;
 uint32_t g_logged_sentence_count = 0;
 uint32_t g_logged_lora_count = 0;
 uint32_t g_logged_json_count = 0;
 size_t g_text_scroll_offset = 0;
 size_t g_signal_scroll_offset = 0;
+size_t g_wireless_scroll_offset = 0;
+size_t g_bluetooth_scroll_offset = 0;
 TrackedSatellite g_tracked_satellites[48];
 size_t g_tracked_satellite_count = 0;
 WifiScanResult g_wifi_scan_results[harvest_log_config::MAX_WIFI_RESULTS];
 size_t g_wifi_scan_count = 0;
+BluetoothScanResult g_bluetooth_scan_results[harvest_log_config::MAX_BLE_RESULTS];
+size_t g_bluetooth_scan_count = 0;
 float g_last_lora_rssi = 0.0f;
 float g_last_lora_snr = 0.0f;
 DisplayMode g_display_mode = DisplayMode::Text;
@@ -317,6 +380,40 @@ String bluetooth_mac_address() {
   return String(buffer);
 }
 
+String bluetooth_address_string(const uint8_t* address) {
+  char buffer[18];
+  snprintf(buffer, sizeof(buffer), "%02X:%02X:%02X:%02X:%02X:%02X", address[0], address[1], address[2], address[3], address[4], address[5]);
+  return String(buffer);
+}
+
+String bluetooth_adv_name(const uint8_t* adv_data, uint8_t adv_len) {
+#if BUILD_ENABLE_BLE_SCAN
+  if (!adv_data || adv_len == 0) {
+    return "";
+  }
+
+  uint8_t name_len = 0;
+  uint8_t* name_data = esp_ble_resolve_adv_data_by_type(const_cast<uint8_t*>(adv_data), adv_len, ESP_BLE_AD_TYPE_NAME_CMPL, &name_len);
+  if (!name_data || name_len == 0) {
+    name_data = esp_ble_resolve_adv_data_by_type(const_cast<uint8_t*>(adv_data), adv_len, ESP_BLE_AD_TYPE_NAME_SHORT, &name_len);
+  }
+  if (!name_data || name_len == 0) {
+    return "";
+  }
+
+  String name;
+  for (uint8_t i = 0; i < name_len; ++i) {
+    const char c = static_cast<char>(name_data[i]);
+    name += (static_cast<unsigned char>(c) < 32 || c == 127) ? '.' : c;
+  }
+  return name;
+#else
+  (void)adv_data;
+  (void)adv_len;
+  return "";
+#endif
+}
+
 String gnss_mode_name(const String& mode_code) {
   if (mode_code == "G") {
     return "GPS";
@@ -419,6 +516,10 @@ const char* mode_name(DisplayMode mode) {
       return "Sat";
     case DisplayMode::SignalBars:
       return "Signal";
+    case DisplayMode::Wireless:
+      return "WiFi";
+    case DisplayMode::Bluetooth:
+      return "BT";
     case DisplayMode::Compass:
       return "Compass";
     case DisplayMode::Speed:
@@ -449,23 +550,60 @@ const char* menu_item_name(size_t index) {
       return "Data Harvester";
     case 1:
       return "File Explorer";
+#if BUILD_ENABLE_USB_STORAGE
     case 2:
       return "USB Storage";
+#endif
     default:
       return "?";
   }
 }
 
+size_t menu_item_count() {
+  return 2 + (BUILD_ENABLE_USB_STORAGE ? 1 : 0);
+}
+
+bool mode_enabled(DisplayMode mode) {
+  switch (mode) {
+    case DisplayMode::Text:
+    case DisplayMode::Satellites:
+    case DisplayMode::SignalBars:
+    case DisplayMode::Compass:
+    case DisplayMode::Speed:
+      return true;
+    case DisplayMode::Wireless:
+      return BUILD_ENABLE_WIFI_SCAN;
+    case DisplayMode::Bluetooth:
+      return BUILD_ENABLE_BLE_SCAN;
+    default:
+      return false;
+  }
+}
+
 DisplayMode next_mode(DisplayMode mode) {
-  const uint8_t next = (static_cast<uint8_t>(mode) + 1) % static_cast<uint8_t>(DisplayMode::Count);
-  return static_cast<DisplayMode>(next);
+  const uint8_t count = static_cast<uint8_t>(DisplayMode::Count);
+  uint8_t next = static_cast<uint8_t>(mode);
+  for (uint8_t i = 0; i < count; ++i) {
+    next = (next + 1) % count;
+    const DisplayMode candidate = static_cast<DisplayMode>(next);
+    if (mode_enabled(candidate)) {
+      return candidate;
+    }
+  }
+  return DisplayMode::Text;
 }
 
 DisplayMode previous_mode(DisplayMode mode) {
   const uint8_t count = static_cast<uint8_t>(DisplayMode::Count);
-  const uint8_t current = static_cast<uint8_t>(mode);
-  const uint8_t previous = (current + count - 1) % count;
-  return static_cast<DisplayMode>(previous);
+  uint8_t previous = static_cast<uint8_t>(mode);
+  for (uint8_t i = 0; i < count; ++i) {
+    previous = (previous + count - 1) % count;
+    const DisplayMode candidate = static_cast<DisplayMode>(previous);
+    if (mode_enabled(candidate)) {
+      return candidate;
+    }
+  }
+  return DisplayMode::Text;
 }
 
 double normalized_course() {
@@ -593,6 +731,150 @@ uint16_t satellite_system_color(char system) {
       return TFT_LIGHTGREY;
   }
 }
+
+uint16_t wifi_signal_color(int32_t rssi) {
+  if (rssi >= -55) {
+    return TFT_GREEN;
+  }
+  if (rssi >= -70) {
+    return TFT_YELLOW;
+  }
+  if (rssi >= -82) {
+    return TFT_ORANGE;
+  }
+  return TFT_RED;
+}
+
+void upsert_bluetooth_scan_result(const String& address, const String& name, int32_t rssi) {
+  if (address.length() == 0) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  size_t existing_index = harvest_log_config::MAX_BLE_RESULTS;
+  for (size_t i = 0; i < g_bluetooth_scan_count; ++i) {
+    if (g_bluetooth_scan_results[i].address == address) {
+      existing_index = i;
+      break;
+    }
+  }
+
+  BluetoothScanResult result;
+  result.address = address;
+  result.name = name;
+  result.rssi = rssi;
+  result.last_seen_ms = now;
+
+  if (existing_index < g_bluetooth_scan_count) {
+    g_bluetooth_scan_results[existing_index] = result;
+  } else if (g_bluetooth_scan_count < harvest_log_config::MAX_BLE_RESULTS) {
+    g_bluetooth_scan_results[g_bluetooth_scan_count++] = result;
+    existing_index = g_bluetooth_scan_count - 1;
+  } else if (rssi > g_bluetooth_scan_results[g_bluetooth_scan_count - 1].rssi) {
+    g_bluetooth_scan_results[g_bluetooth_scan_count - 1] = result;
+    existing_index = g_bluetooth_scan_count - 1;
+  } else {
+    return;
+  }
+
+  while (existing_index > 0 && g_bluetooth_scan_results[existing_index - 1].rssi < g_bluetooth_scan_results[existing_index].rssi) {
+    const BluetoothScanResult swap = g_bluetooth_scan_results[existing_index - 1];
+    g_bluetooth_scan_results[existing_index - 1] = g_bluetooth_scan_results[existing_index];
+    g_bluetooth_scan_results[existing_index] = swap;
+    --existing_index;
+  }
+}
+
+#if BUILD_ENABLE_BLE_SCAN
+void start_bluetooth_scan() {
+  if (!g_ble_ready || !g_ble_scan_configured || g_ble_scan_active) {
+    return;
+  }
+  if (esp_ble_gap_start_scanning(harvest_log_config::BLE_SCAN_DURATION_S) != ESP_OK) {
+    return;
+  }
+  g_ble_scan_active = true;
+  g_last_ble_scan_ms = millis();
+  g_needs_redraw = true;
+}
+
+void bluetooth_gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
+  if (!param) {
+    return;
+  }
+
+  switch (event) {
+    case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
+      g_ble_scan_configured = param->scan_param_cmpl.status == ESP_BT_STATUS_SUCCESS;
+      if (g_ble_scan_configured) {
+        start_bluetooth_scan();
+      }
+      break;
+    case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
+      if (param->scan_start_cmpl.status != ESP_BT_STATUS_SUCCESS) {
+        g_ble_scan_active = false;
+      }
+      g_needs_redraw = true;
+      break;
+    case ESP_GAP_BLE_SCAN_RESULT_EVT:
+      if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT) {
+        const uint8_t adv_len = param->scan_rst.adv_data_len + param->scan_rst.scan_rsp_len;
+        upsert_bluetooth_scan_result(
+            bluetooth_address_string(param->scan_rst.bda),
+            bluetooth_adv_name(param->scan_rst.ble_adv, adv_len),
+            param->scan_rst.rssi);
+        g_needs_redraw = true;
+      } else if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
+        g_ble_scan_active = false;
+        g_last_ble_scan_ms = millis();
+        g_needs_redraw = true;
+      }
+      break;
+    case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
+      g_ble_scan_active = false;
+      g_last_ble_scan_ms = millis();
+      g_needs_redraw = true;
+      break;
+    default:
+      break;
+  }
+}
+
+bool init_bluetooth_scanner() {
+  if (!btStarted() && !btStartMode(BT_MODE_BLE)) {
+    return false;
+  }
+
+  esp_bluedroid_status_t bt_state = esp_bluedroid_get_status();
+  if (bt_state == ESP_BLUEDROID_STATUS_UNINITIALIZED && esp_bluedroid_init() != ESP_OK) {
+    return false;
+  }
+  bt_state = esp_bluedroid_get_status();
+  if (bt_state != ESP_BLUEDROID_STATUS_ENABLED && esp_bluedroid_enable() != ESP_OK) {
+    return false;
+  }
+
+  if (esp_ble_gap_register_callback(bluetooth_gap_callback) != ESP_OK) {
+    return false;
+  }
+
+  static esp_ble_scan_params_t scan_params = {
+      BLE_SCAN_TYPE_ACTIVE,
+      BLE_ADDR_TYPE_PUBLIC,
+      BLE_SCAN_FILTER_ALLOW_ALL,
+      0x50,
+      0x30,
+      BLE_SCAN_DUPLICATE_ENABLE};
+  if (esp_ble_gap_set_scan_params(&scan_params) != ESP_OK) {
+    return false;
+  }
+  return true;
+}
+#else
+bool init_bluetooth_scanner() {
+  return false;
+}
+#endif
 
 int visible_tracked_satellite_count() {
   int visible = 0;
@@ -963,6 +1245,7 @@ void mark_sd_unavailable() {
   g_needs_redraw = true;
 }
 
+#if BUILD_ENABLE_USB_STORAGE
 void stop_usb_storage_mode() {
   if (!g_usb_storage_active) {
     return;
@@ -1009,6 +1292,16 @@ bool start_usb_storage_mode() {
   g_usb_status = "Connect USB to PC";
   return true;
 }
+#else
+void stop_usb_storage_mode() {
+  g_usb_storage_active = false;
+}
+
+bool start_usb_storage_mode() {
+  g_usb_status = "USB storage disabled";
+  return false;
+}
+#endif
 
 void enter_menu_mode() {
   if (g_app_mode == AppMode::UsbStorage) {
@@ -1016,6 +1309,9 @@ void enter_menu_mode() {
   }
   close_log_files();
   g_app_mode = AppMode::Menu;
+  if (g_menu_selected_index >= menu_item_count()) {
+    g_menu_selected_index = menu_item_count() > 0 ? menu_item_count() - 1 : 0;
+  }
   g_needs_redraw = true;
 }
 
@@ -1027,8 +1323,11 @@ void enter_harvest_mode() {
   g_last_gnss_info_ms = 0;
   g_last_json_snapshot_ms = 0;
   g_last_wifi_scan_ms = 0;
+  g_last_ble_scan_ms = 0;
   g_text_scroll_offset = 0;
   g_signal_scroll_offset = 0;
+  g_wireless_scroll_offset = 0;
+  g_bluetooth_scroll_offset = 0;
   update_status();
   g_needs_redraw = true;
 }
@@ -1048,9 +1347,14 @@ void enter_explorer_mode() {
 }
 
 void enter_usb_storage_app_mode() {
+#if BUILD_ENABLE_USB_STORAGE
   close_log_files();
   g_app_mode = AppMode::UsbStorage;
   start_usb_storage_mode();
+#else
+  g_usb_status = "USB storage disabled";
+  g_app_mode = AppMode::Menu;
+#endif
   g_needs_redraw = true;
 }
 
@@ -1177,6 +1481,7 @@ bool open_lora_log_file_if_needed() {
 }
 
 bool open_jsonl_log_file_if_needed() {
+#if BUILD_ENABLE_JSONL_LOG
   if (!g_sd_ready) {
     return false;
   }
@@ -1197,9 +1502,13 @@ bool open_jsonl_log_file_if_needed() {
 
   g_needs_redraw = true;
   return true;
+#else
+  return false;
+#endif
 }
 
 void scan_wifi_networks() {
+#if BUILD_ENABLE_WIFI_SCAN
   if (WiFi.getMode() != WIFI_MODE_STA) {
     WiFi.mode(WIFI_MODE_STA);
     WiFi.disconnect(false, false);
@@ -1224,14 +1533,25 @@ void scan_wifi_networks() {
     ++g_wifi_scan_count;
   }
   WiFi.scanDelete();
+#else
+  g_wifi_scan_count = 0;
+#endif
 }
 
 void refresh_wireless_scans() {
   const uint32_t now = millis();
+#if BUILD_ENABLE_WIFI_SCAN
   if (now - g_last_wifi_scan_ms >= harvest_log_config::WIFI_SCAN_INTERVAL_MS) {
     scan_wifi_networks();
     g_last_wifi_scan_ms = now;
   }
+#endif
+#if BUILD_ENABLE_BLE_SCAN
+  if (g_ble_ready && g_ble_scan_configured && !g_ble_scan_active &&
+      now - g_last_ble_scan_ms >= harvest_log_config::BLE_SCAN_INTERVAL_MS) {
+    start_bluetooth_scan();
+  }
+#endif
 }
 
 String build_jsonl_snapshot() {
@@ -1264,6 +1584,7 @@ String build_jsonl_snapshot() {
   line += ",\"last_rssi\":" + String(g_last_lora_rssi, 1);
   line += ",\"last_snr\":" + String(g_last_lora_snr, 1);
   line += "}";
+#if BUILD_ENABLE_WIFI_SCAN
   line += ",\"wifi\":[";
   for (size_t i = 0; i < g_wifi_scan_count; ++i) {
     if (i > 0) {
@@ -1278,15 +1599,17 @@ String build_jsonl_snapshot() {
     line += "}";
   }
   line += "]";
+#endif
   line += ",\"bluetooth\":{";
   line += "\"mac\":" + json_string(bluetooth_mac_address());
-  line += ",\"supported\":true";
+  line += ",\"supported\":" + String(BUILD_ENABLE_BLE_SCAN ? "true" : "false");
   line += "}";
   line += "}";
   return line;
 }
 
 void append_jsonl_snapshot_if_needed() {
+#if BUILD_ENABLE_JSONL_LOG
   const uint32_t now = millis();
   if (now - g_last_json_snapshot_ms < harvest_log_config::SNAPSHOT_INTERVAL_MS) {
     return;
@@ -1309,6 +1632,7 @@ void append_jsonl_snapshot_if_needed() {
   g_last_json_snapshot_ms = now;
   ++g_logged_json_count;
   g_needs_redraw = true;
+#endif
 }
 
 void append_nmea_log(const String& sentence) {
@@ -1583,7 +1907,7 @@ void handle_keyboard_input() {
     if (move_up && g_menu_selected_index > 0) {
       --g_menu_selected_index;
       g_needs_redraw = true;
-    } else if (move_down && g_menu_selected_index + 1 < menu_config::ITEM_COUNT) {
+    } else if (move_down && g_menu_selected_index + 1 < menu_item_count()) {
       ++g_menu_selected_index;
       g_needs_redraw = true;
     } else if (accept) {
@@ -1594,9 +1918,11 @@ void handle_keyboard_input() {
         case 1:
           enter_explorer_mode();
           break;
+#if BUILD_ENABLE_USB_STORAGE
         case 2:
           enter_usb_storage_app_mode();
           break;
+#endif
       }
     }
     return;
@@ -1642,16 +1968,48 @@ void handle_keyboard_input() {
         return;
       }
     }
+    if (g_display_mode == DisplayMode::Wireless) {
+      const size_t visible_networks = wireless_mode_config::VISIBLE_NETWORKS;
+      const size_t max_scroll = g_wifi_scan_count > visible_networks ? g_wifi_scan_count - visible_networks : 0;
+      if (move_up && g_wireless_scroll_offset > 0) {
+        --g_wireless_scroll_offset;
+        g_needs_redraw = true;
+        return;
+      }
+      if (move_down && g_wireless_scroll_offset < max_scroll) {
+        ++g_wireless_scroll_offset;
+        g_needs_redraw = true;
+        return;
+      }
+    }
+    if (g_display_mode == DisplayMode::Bluetooth) {
+      const size_t visible_devices = wireless_mode_config::VISIBLE_BLUETOOTH;
+      const size_t max_scroll = g_bluetooth_scan_count > visible_devices ? g_bluetooth_scan_count - visible_devices : 0;
+      if (move_up && g_bluetooth_scroll_offset > 0) {
+        --g_bluetooth_scroll_offset;
+        g_needs_redraw = true;
+        return;
+      }
+      if (move_down && g_bluetooth_scroll_offset < max_scroll) {
+        ++g_bluetooth_scroll_offset;
+        g_needs_redraw = true;
+        return;
+      }
+    }
 
     if (move_left) {
       g_display_mode = previous_mode(g_display_mode);
       g_text_scroll_offset = 0;
       g_signal_scroll_offset = 0;
+      g_wireless_scroll_offset = 0;
+      g_bluetooth_scroll_offset = 0;
       g_needs_redraw = true;
     } else if (move_right) {
       g_display_mode = next_mode(g_display_mode);
       g_text_scroll_offset = 0;
       g_signal_scroll_offset = 0;
+      g_wireless_scroll_offset = 0;
+      g_bluetooth_scroll_offset = 0;
       g_needs_redraw = true;
     }
     return;
@@ -1775,7 +2133,9 @@ void draw_common_frame(const char* title) {
   display.setCursor(0, height - 10);
   if (g_app_mode == AppMode::Explorer) {
     display.print("Cur mv Ent ok Esc/BS bk");
-  } else if (g_app_mode == AppMode::Harvest && g_display_mode == DisplayMode::Text) {
+  } else if (g_app_mode == AppMode::Harvest &&
+             (g_display_mode == DisplayMode::Text || g_display_mode == DisplayMode::SignalBars ||
+              g_display_mode == DisplayMode::Wireless || g_display_mode == DisplayMode::Bluetooth)) {
     display.print("U/D:Scr L/R:Mode Esc:Menu");
   } else {
     display.printf("BtnA/Cur:%s Esc:Menu", mode_name(g_display_mode));
@@ -1798,7 +2158,7 @@ void draw_menu_mode() {
   display.printf("SD:%s USB:%s\n", g_sd_ready ? "OK" : "NG", g_usb_storage_active ? "MSC" : "Idle");
   display.drawFastHLine(0, 18, width, TFT_DARKGREY);
   display.setCursor(0, 22);
-  for (size_t i = 0; i < menu_config::ITEM_COUNT; ++i) {
+  for (size_t i = 0; i < menu_item_count(); ++i) {
     const bool selected = i == g_menu_selected_index;
     display.setTextColor(selected ? TFT_BLACK : TFT_WHITE, selected ? TFT_GREENYELLOW : TFT_BLACK);
     display.printf("%c %s\n", selected ? '>' : ' ', menu_item_name(i));
@@ -2007,6 +2367,131 @@ void draw_signal_bars_mode() {
   draw_vertical_scrollbar(235, chart_y, max_bars * (bar_h + bar_gap) - bar_gap, total_count, visible_count, g_signal_scroll_offset);
 }
 
+void draw_wireless_mode() {
+  auto& display = g_canvas;
+  draw_common_frame("Wireless");
+
+  const int chart_x = 86;
+  const int chart_w = 126;
+  const int row_h = wireless_mode_config::ROW_HEIGHT;
+  const int row_gap = wireless_mode_config::ROW_GAP;
+  const size_t visible_count = wireless_mode_config::VISIBLE_NETWORKS;
+  const size_t max_scroll = g_wifi_scan_count > visible_count ? g_wifi_scan_count - visible_count : 0;
+  if (g_wireless_scroll_offset > max_scroll) {
+    g_wireless_scroll_offset = max_scroll;
+  }
+
+  display.setTextColor(TFT_CYAN, TFT_BLACK);
+  display.setCursor(0, wireless_mode_config::INFO_TOP_Y);
+  display.printf("WiFi:%u AP  BT:%s",
+                 static_cast<unsigned>(g_wifi_scan_count),
+                 bluetooth_mac_address().length() > 0 ? "MAC" : "N/A");
+  display.setCursor(0, wireless_mode_config::INFO_TOP_Y + text_mode_config::LINE_HEIGHT);
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  display.print(fit_text(bluetooth_mac_address().length() > 0 ? bluetooth_mac_address() : "BT scan unavailable", 30));
+
+  if (g_wifi_scan_count == 0) {
+    display.setTextColor(TFT_ORANGE, TFT_BLACK);
+    display.setCursor(34, 68);
+    display.print("No WiFi scan yet");
+    return;
+  }
+
+  for (size_t row = 0; row < visible_count; ++row) {
+    const size_t index = g_wireless_scroll_offset + row;
+    if (index >= g_wifi_scan_count) {
+      break;
+    }
+
+    const WifiScanResult& ap = g_wifi_scan_results[index];
+    const int y = wireless_mode_config::LIST_TOP_Y + static_cast<int>(row) * (row_h + row_gap);
+    const int clamped_rssi = ap.rssi < -100 ? -100 : (ap.rssi > -30 ? -30 : ap.rssi);
+    const int value_w = ((clamped_rssi + 100) * chart_w) / 70;
+    const uint16_t color = wifi_signal_color(ap.rssi);
+    const String ssid = ap.ssid.length() > 0 ? ap.ssid : "(hidden)";
+
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.setCursor(0, y + 2);
+    display.print(fit_text(ssid, 11));
+    display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    display.setCursor(66, y + 2);
+    display.printf("C%02ld", static_cast<long>(ap.channel));
+    display.drawRect(chart_x, y, chart_w, row_h, TFT_DARKGREY);
+    if (value_w > 0) {
+      display.fillRect(chart_x + 1, y + 1, value_w > chart_w - 2 ? chart_w - 2 : value_w, row_h - 2, color);
+    }
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.setCursor(chart_x + chart_w - 30, y + 2);
+    display.printf("%4ld", static_cast<long>(ap.rssi));
+  }
+
+  draw_vertical_scrollbar(235,
+                          wireless_mode_config::LIST_TOP_Y,
+                          static_cast<int>(visible_count) * (row_h + row_gap) - row_gap,
+                          g_wifi_scan_count,
+                          visible_count,
+                          g_wireless_scroll_offset);
+}
+
+void draw_bluetooth_mode() {
+  auto& display = g_canvas;
+  draw_common_frame("Bluetooth");
+
+  const size_t visible_count = wireless_mode_config::VISIBLE_BLUETOOTH;
+  const size_t max_scroll = g_bluetooth_scan_count > visible_count ? g_bluetooth_scan_count - visible_count : 0;
+  if (g_bluetooth_scroll_offset > max_scroll) {
+    g_bluetooth_scroll_offset = max_scroll;
+  }
+
+  display.setTextColor(TFT_CYAN, TFT_BLACK);
+  display.setCursor(0, wireless_mode_config::INFO_TOP_Y);
+  display.printf("BLE:%u %s",
+                 static_cast<unsigned>(g_bluetooth_scan_count),
+                 g_ble_scan_active ? "Scanning" : "Idle");
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  display.setCursor(0, wireless_mode_config::INFO_TOP_Y + text_mode_config::LINE_HEIGHT);
+  display.print(fit_text(bluetooth_mac_address(), 30));
+
+  if (g_bluetooth_scan_count == 0) {
+    display.setTextColor(TFT_ORANGE, TFT_BLACK);
+    display.setCursor(26, 66);
+    display.print(g_ble_ready ? "No BLE devices yet" : "BLE unavailable");
+    return;
+  }
+
+  for (size_t row = 0; row < visible_count; ++row) {
+    const size_t index = g_bluetooth_scroll_offset + row;
+    if (index >= g_bluetooth_scan_count) {
+      break;
+    }
+
+    const BluetoothScanResult& device = g_bluetooth_scan_results[index];
+    const int y = wireless_mode_config::BLUETOOTH_LIST_TOP_Y + static_cast<int>(row) *
+                                                              (wireless_mode_config::ROW_HEIGHT + wireless_mode_config::ROW_GAP);
+    const uint16_t color = wifi_signal_color(device.rssi);
+    const String label = device.name.length() > 0 ? device.name : device.address;
+    const String suffix = device.address.length() > 8 ? device.address.substring(device.address.length() - 8) : device.address;
+
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.setCursor(0, y + 2);
+    display.print(fit_text(label, 12));
+    display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    display.setCursor(98, y + 2);
+    display.print(suffix);
+    display.setTextColor(color, TFT_BLACK);
+    display.setCursor(206, y + 2);
+    display.printf("%4ld", static_cast<long>(device.rssi));
+  }
+
+  draw_vertical_scrollbar(235,
+                          wireless_mode_config::BLUETOOTH_LIST_TOP_Y,
+                          static_cast<int>(visible_count) * (wireless_mode_config::ROW_HEIGHT + wireless_mode_config::ROW_GAP) -
+                              wireless_mode_config::ROW_GAP,
+                          g_bluetooth_scan_count,
+                          visible_count,
+                          g_bluetooth_scroll_offset);
+}
+
 void draw_compass_mode() {
   auto& display = g_canvas;
   const int width = display.width();
@@ -2194,6 +2679,12 @@ void draw_ui() {
         case DisplayMode::SignalBars:
           draw_signal_bars_mode();
           break;
+        case DisplayMode::Wireless:
+          draw_wireless_mode();
+          break;
+        case DisplayMode::Bluetooth:
+          draw_bluetooth_mode();
+          break;
         case DisplayMode::Compass:
           draw_compass_mode();
           break;
@@ -2230,9 +2721,16 @@ void setup() {
   g_canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
   g_canvas.setTextFont(1);
   g_canvas.setTextSize(1);
+#if BUILD_ENABLE_WIFI_SCAN
   WiFi.mode(WIFI_MODE_STA);
   WiFi.disconnect(false, false);
   WiFi.setSleep(false);
+#endif
+#if BUILD_ENABLE_BLE_SCAN
+  g_ble_ready = init_bluetooth_scanner();
+#else
+  g_ble_ready = false;
+#endif
 
   init_spi_bus();
   GPSSerial.begin(gps_config::UART_BAUD, SERIAL_8N1, board_pins::GPS_RX, board_pins::GPS_TX);
@@ -2280,16 +2778,18 @@ void loop() {
 
     update_status();
 
-    refresh_wireless_scans();
-    append_jsonl_snapshot_if_needed();
+     refresh_wireless_scans();
+     append_jsonl_snapshot_if_needed();
 
-    if (M5Cardputer.BtnA.wasClicked()) {
-      g_display_mode = next_mode(g_display_mode);
-      g_text_scroll_offset = 0;
-      g_signal_scroll_offset = 0;
-      g_needs_redraw = true;
-    }
-  }
+     if (M5Cardputer.BtnA.wasClicked()) {
+       g_display_mode = next_mode(g_display_mode);
+       g_text_scroll_offset = 0;
+       g_signal_scroll_offset = 0;
+       g_wireless_scroll_offset = 0;
+       g_bluetooth_scroll_offset = 0;
+       g_needs_redraw = true;
+     }
+   }
 
   const uint32_t now = millis();
   if (now - g_last_draw_ms >= gps_config::UI_REFRESH_MS) {
