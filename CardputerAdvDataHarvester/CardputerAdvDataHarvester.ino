@@ -6,6 +6,8 @@
 #include <SD.h>
 #include <USB.h>
 #include <USBMSC.h>
+#include <WiFi.h>
+#include <esp_mac.h>
 #include <math.h>
 
 namespace board_pins {
@@ -31,6 +33,13 @@ constexpr uint32_t SATELLITE_TIMEOUT_MS = 15000;
 constexpr float SPEED_MAX_KMH = 120.0f;
 constexpr size_t NMEA_SENTENCE_MAX_LEN = 120;
 constexpr size_t QUERY_LINE_MAX_LEN = 127;
+}
+
+namespace harvest_log_config {
+constexpr uint32_t SNAPSHOT_INTERVAL_MS = 5000;
+constexpr uint32_t WIFI_SCAN_INTERVAL_MS = 30000;
+constexpr uint16_t WIFI_SCAN_MAX_MS_PER_CHANNEL = 40;
+constexpr size_t MAX_WIFI_RESULTS = 12;
 }
 
 namespace lora_config {
@@ -61,8 +70,14 @@ namespace menu_config {
 constexpr size_t ITEM_COUNT = 3;
 }
 
+namespace log_dir_config {
+constexpr const char* GPS = "/gps";
+constexpr const char* LORA = "/lora";
+constexpr const char* JSONL = "/jsonl";
+}
+
 namespace text_mode_config {
-constexpr size_t MAX_LINES = 16;
+constexpr size_t MAX_LINES = 20;
 constexpr int TOP_Y = 22;
 constexpr int LINE_HEIGHT = 10;
 }
@@ -78,6 +93,7 @@ constexpr uint8_t UP = 0x52;
 enum class DisplayMode : uint8_t {
   Text = 0,
   Satellites,
+  SignalBars,
   Compass,
   Speed,
   Count
@@ -99,6 +115,14 @@ struct TrackedSatellite {
   uint32_t last_seen_ms = 0;
 };
 
+struct WifiScanResult {
+  String ssid;
+  String bssid;
+  int32_t rssi = 0;
+  int32_t channel = 0;
+  wifi_auth_mode_t encryption = WIFI_AUTH_OPEN;
+};
+
 HardwareSerial GPSSerial(1);
 TinyGPSPlus gps;
 SX1262 radio = new Module(
@@ -111,6 +135,7 @@ M5Canvas g_canvas(&M5Cardputer.Display);
 USBMSC g_usb_msc;
 File g_gps_log_file;
 File g_lora_log_file;
+File g_jsonl_log_file;
 
 volatile bool g_radio_rx_flag = false;
 bool g_needs_redraw = true;
@@ -123,20 +148,31 @@ bool g_usb_storage_active = false;
 String g_status = "Booting...";
 String g_gps_log_path;
 String g_lora_log_path;
+String g_jsonl_log_path;
 String g_nmea_sentence;
 String g_gnss_version = "-";
 String g_gnss_mode = "-";
 String g_lora_status = "LoRa init...";
+String g_last_lora_message;
+String g_last_lora_timestamp = "-";
 String g_usb_status = "Select from menu";
 uint32_t g_last_draw_ms = 0;
 uint32_t g_last_data_ms = 0;
 uint32_t g_last_gnss_info_ms = 0;
 uint32_t g_last_sd_check_ms = 0;
+uint32_t g_last_json_snapshot_ms = 0;
+uint32_t g_last_wifi_scan_ms = 0;
 uint32_t g_logged_sentence_count = 0;
 uint32_t g_logged_lora_count = 0;
+uint32_t g_logged_json_count = 0;
 size_t g_text_scroll_offset = 0;
+size_t g_signal_scroll_offset = 0;
 TrackedSatellite g_tracked_satellites[48];
 size_t g_tracked_satellite_count = 0;
+WifiScanResult g_wifi_scan_results[harvest_log_config::MAX_WIFI_RESULTS];
+size_t g_wifi_scan_count = 0;
+float g_last_lora_rssi = 0.0f;
+float g_last_lora_snr = 0.0f;
 DisplayMode g_display_mode = DisplayMode::Text;
 AppMode g_app_mode = AppMode::Menu;
 size_t g_menu_selected_index = 0;
@@ -200,6 +236,87 @@ String format_log_timestamp() {
   return "millis=" + String(millis());
 }
 
+String json_escape(const String& text) {
+  String escaped;
+  escaped.reserve(text.length() + 8);
+  for (size_t i = 0; i < text.length(); ++i) {
+    const char c = text[i];
+    switch (c) {
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\b':
+        escaped += "\\b";
+        break;
+      case '\f':
+        escaped += "\\f";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        if (static_cast<unsigned char>(c) < 32) {
+          char buffer[7];
+          snprintf(buffer, sizeof(buffer), "\\u%04x", static_cast<unsigned char>(c));
+          escaped += buffer;
+        } else {
+          escaped += c;
+        }
+        break;
+    }
+  }
+  return escaped;
+}
+
+String json_string(const String& text) {
+  return "\"" + json_escape(text) + "\"";
+}
+
+const char* wifi_auth_name(wifi_auth_mode_t encryption) {
+  switch (encryption) {
+    case WIFI_AUTH_OPEN:
+      return "open";
+    case WIFI_AUTH_WEP:
+      return "wep";
+    case WIFI_AUTH_WPA_PSK:
+      return "wpa-psk";
+    case WIFI_AUTH_WPA2_PSK:
+      return "wpa2-psk";
+    case WIFI_AUTH_WPA_WPA2_PSK:
+      return "wpa-wpa2-psk";
+    case WIFI_AUTH_WPA2_ENTERPRISE:
+      return "wpa2-enterprise";
+    case WIFI_AUTH_WPA3_PSK:
+      return "wpa3-psk";
+    case WIFI_AUTH_WPA2_WPA3_PSK:
+      return "wpa2-wpa3-psk";
+    case WIFI_AUTH_WAPI_PSK:
+      return "wapi-psk";
+    default:
+      return "unknown";
+  }
+}
+
+String bluetooth_mac_address() {
+  uint8_t mac[6];
+  if (esp_read_mac(mac, ESP_MAC_BT) != ESP_OK) {
+    return "";
+  }
+
+  char buffer[18];
+  snprintf(buffer, sizeof(buffer), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buffer);
+}
+
 String gnss_mode_name(const String& mode_code) {
   if (mode_code == "G") {
     return "GPS";
@@ -253,17 +370,35 @@ size_t max_text_scroll_offset(size_t line_count) {
   return line_count > visible_lines ? line_count - visible_lines : 0;
 }
 
-void draw_scroll_indicator(bool can_scroll_up, bool can_scroll_down, int top_y, int bottom_y) {
+void draw_vertical_scrollbar(int x, int top_y, int height, size_t total_items, size_t visible_items, size_t offset) {
+  if (total_items <= visible_items || visible_items == 0 || height <= 0) {
+    return;
+  }
+
   auto& display = g_canvas;
-  display.setTextColor(TFT_CYAN, TFT_BLACK);
-  if (can_scroll_up) {
-    display.setCursor(display.width() - 6, top_y);
-    display.print("^");
+  display.drawRect(x, top_y, 4, height, TFT_DARKGREY);
+
+  int thumb_h = static_cast<int>((static_cast<float>(visible_items) / static_cast<float>(total_items)) * (height - 2));
+  if (thumb_h < 8) {
+    thumb_h = 8;
   }
-  if (can_scroll_down) {
-    display.setCursor(display.width() - 6, bottom_y);
-    display.print("v");
+  if (thumb_h > height - 2) {
+    thumb_h = height - 2;
   }
+
+  const size_t max_offset = total_items - visible_items;
+  int thumb_y = top_y + 1;
+  if (max_offset > 0) {
+    thumb_y += static_cast<int>((static_cast<float>(offset) / static_cast<float>(max_offset)) * (height - thumb_h - 2));
+  }
+  display.fillRect(x + 1, thumb_y, 2, thumb_h, TFT_CYAN);
+}
+
+void draw_content_scrollbar(int top_y, int bottom_y, size_t total_items, size_t visible_items, size_t offset) {
+  if (bottom_y < top_y) {
+    return;
+  }
+  draw_vertical_scrollbar(g_canvas.width() - 5, top_y, bottom_y - top_y + 1, total_items, visible_items, offset);
 }
 
 String fit_text(const String& text, size_t max_len) {
@@ -282,6 +417,8 @@ const char* mode_name(DisplayMode mode) {
       return "Text";
     case DisplayMode::Satellites:
       return "Sat";
+    case DisplayMode::SignalBars:
+      return "Signal";
     case DisplayMode::Compass:
       return "Compass";
     case DisplayMode::Speed:
@@ -468,6 +605,32 @@ int visible_tracked_satellite_count() {
   return visible;
 }
 
+size_t collect_signal_satellite_indices(int* indices, size_t capacity) {
+  const uint32_t now = millis();
+  size_t count = 0;
+
+  for (size_t i = 0; i < g_tracked_satellite_count && count < capacity; ++i) {
+    const TrackedSatellite& sat = g_tracked_satellites[i];
+    if (now - sat.last_seen_ms > gps_config::SATELLITE_TIMEOUT_MS || sat.snr < 0) {
+      continue;
+    }
+
+    size_t insert_at = count;
+    while (insert_at > 0) {
+      const int prev_index = indices[insert_at - 1];
+      if (prev_index < 0 || g_tracked_satellites[prev_index].snr >= sat.snr) {
+        break;
+      }
+      indices[insert_at] = indices[insert_at - 1];
+      --insert_at;
+    }
+    indices[insert_at] = static_cast<int>(i);
+    ++count;
+  }
+
+  return count;
+}
+
 TrackedSatellite* find_tracked_satellite(char system, uint16_t id) {
   for (size_t i = 0; i < g_tracked_satellite_count; ++i) {
     if (g_tracked_satellites[i].system == system && g_tracked_satellites[i].id == id) {
@@ -546,6 +709,7 @@ void close_file(File& file) {
 void close_log_files() {
   close_file(g_gps_log_file);
   close_file(g_lora_log_file);
+  close_file(g_jsonl_log_file);
 }
 
 void clear_explorer_entries() {
@@ -791,6 +955,7 @@ void mark_sd_unavailable() {
   close_log_files();
   g_gps_log_path = "";
   g_lora_log_path = "";
+  g_jsonl_log_path = "";
   clear_explorer_entries();
   g_explorer_loaded = false;
   g_explorer_viewing_file = false;
@@ -860,7 +1025,10 @@ void enter_harvest_mode() {
   }
   g_app_mode = AppMode::Harvest;
   g_last_gnss_info_ms = 0;
+  g_last_json_snapshot_ms = 0;
+  g_last_wifi_scan_ms = 0;
   g_text_scroll_offset = 0;
+  g_signal_scroll_offset = 0;
   update_status();
   g_needs_redraw = true;
 }
@@ -886,13 +1054,24 @@ void enter_usb_storage_app_mode() {
   g_needs_redraw = true;
 }
 
-String build_log_path(const char* prefix, const char* extension) {
-  char buffer[48];
+bool ensure_log_directory(const char* directory) {
+  if (!g_sd_ready) {
+    return false;
+  }
+  if (SD.exists(directory)) {
+    return true;
+  }
+  return SD.mkdir(directory);
+}
+
+String build_log_path(const char* directory, const char* prefix, const char* extension) {
+  char buffer[64];
   if (gps.date.isValid() && gps.time.isValid()) {
     snprintf(
         buffer,
         sizeof(buffer),
-        "/%s_%04d%02d%02d_%02d%02d%02d%s",
+        "%s/%s_%04d%02d%02d_%02d%02d%02d%s",
+        directory,
         prefix,
         gps.date.year(),
         gps.date.month(),
@@ -902,17 +1081,21 @@ String build_log_path(const char* prefix, const char* extension) {
         gps.time.second(),
         extension);
   } else {
-    snprintf(buffer, sizeof(buffer), "/%s_%lu%s", prefix, millis() / 1000UL, extension);
+    snprintf(buffer, sizeof(buffer), "%s/%s_%lu%s", directory, prefix, millis() / 1000UL, extension);
   }
   return String(buffer);
 }
 
 String build_gps_log_path() {
-  return build_log_path("gps", ".nmea");
+  return build_log_path(log_dir_config::GPS, "gps", ".nmea");
 }
 
 String build_lora_log_path() {
-  return build_log_path("lora", ".log");
+  return build_log_path(log_dir_config::LORA, "lora", ".log");
+}
+
+String build_jsonl_log_path() {
+  return build_log_path(log_dir_config::JSONL, "harvest", ".jsonl");
 }
 
 void init_spi_bus() {
@@ -954,6 +1137,10 @@ bool open_gps_log_file_if_needed() {
   if (g_gps_log_file) {
     return true;
   }
+  if (!ensure_log_directory(log_dir_config::GPS)) {
+    mark_sd_unavailable();
+    return false;
+  }
 
   g_gps_log_path = build_gps_log_path();
   g_gps_log_file = SD.open(g_gps_log_path.c_str(), FILE_APPEND);
@@ -973,6 +1160,10 @@ bool open_lora_log_file_if_needed() {
   if (g_lora_log_file) {
     return true;
   }
+  if (!ensure_log_directory(log_dir_config::LORA)) {
+    mark_sd_unavailable();
+    return false;
+  }
 
   g_lora_log_path = build_lora_log_path();
   g_lora_log_file = SD.open(g_lora_log_path.c_str(), FILE_APPEND);
@@ -983,6 +1174,141 @@ bool open_lora_log_file_if_needed() {
 
   g_needs_redraw = true;
   return true;
+}
+
+bool open_jsonl_log_file_if_needed() {
+  if (!g_sd_ready) {
+    return false;
+  }
+  if (g_jsonl_log_file) {
+    return true;
+  }
+  if (!ensure_log_directory(log_dir_config::JSONL)) {
+    mark_sd_unavailable();
+    return false;
+  }
+
+  g_jsonl_log_path = build_jsonl_log_path();
+  g_jsonl_log_file = SD.open(g_jsonl_log_path.c_str(), FILE_APPEND);
+  if (!g_jsonl_log_file) {
+    mark_sd_unavailable();
+    return false;
+  }
+
+  g_needs_redraw = true;
+  return true;
+}
+
+void scan_wifi_networks() {
+  if (WiFi.getMode() != WIFI_MODE_STA) {
+    WiFi.mode(WIFI_MODE_STA);
+    WiFi.disconnect(false, false);
+  }
+
+  g_wifi_scan_count = 0;
+  const int found = WiFi.scanNetworks(false, true, false, harvest_log_config::WIFI_SCAN_MAX_MS_PER_CHANNEL);
+  if (found <= 0) {
+    WiFi.scanDelete();
+    return;
+  }
+
+  const int limit = found < static_cast<int>(harvest_log_config::MAX_WIFI_RESULTS)
+                        ? found
+                        : static_cast<int>(harvest_log_config::MAX_WIFI_RESULTS);
+  for (int i = 0; i < limit; ++i) {
+    g_wifi_scan_results[g_wifi_scan_count].ssid = WiFi.SSID(i);
+    g_wifi_scan_results[g_wifi_scan_count].bssid = WiFi.BSSIDstr(i);
+    g_wifi_scan_results[g_wifi_scan_count].rssi = WiFi.RSSI(i);
+    g_wifi_scan_results[g_wifi_scan_count].channel = WiFi.channel(i);
+    g_wifi_scan_results[g_wifi_scan_count].encryption = WiFi.encryptionType(i);
+    ++g_wifi_scan_count;
+  }
+  WiFi.scanDelete();
+}
+
+void refresh_wireless_scans() {
+  const uint32_t now = millis();
+  if (now - g_last_wifi_scan_ms >= harvest_log_config::WIFI_SCAN_INTERVAL_MS) {
+    scan_wifi_networks();
+    g_last_wifi_scan_ms = now;
+  }
+}
+
+String build_jsonl_snapshot() {
+  String line = "{";
+  line += "\"time\":" + json_string(format_log_timestamp());
+  line += ",\"millis\":" + String(millis());
+  line += ",\"app_mode\":" + json_string(app_mode_name(g_app_mode));
+  line += ",\"display_mode\":" + json_string(mode_name(g_display_mode));
+  line += ",\"battery\":{\"percent\":" + String(M5.Power.getBatteryLevel()) + "}";
+  line += ",\"device\":{\"heap_free\":" + String(ESP.getFreeHeap()) + ",\"psram_free\":" + String(ESP.getFreePsram()) + "}";
+  line += ",\"gps\":{";
+  line += "\"fix\":" + String(has_gps_fix() ? "true" : "false");
+  line += ",\"mode\":" + json_string(g_gnss_mode);
+  line += ",\"version\":" + json_string(g_gnss_version);
+  line += ",\"lat\":" + (gps.location.isValid() ? String(gps.location.lat(), 6) : "null");
+  line += ",\"lon\":" + (gps.location.isValid() ? String(gps.location.lng(), 6) : "null");
+  line += ",\"alt_m\":" + (gps.altitude.isValid() ? String(gps.altitude.meters(), 1) : "null");
+  line += ",\"speed_kmh\":" + (gps.speed.isValid() ? String(gps.speed.kmph(), 1) : "null");
+  line += ",\"course_deg\":" + (gps.course.isValid() ? String(gps.course.deg(), 1) : "null");
+  line += ",\"satellites_used\":" + (gps.satellites.isValid() ? String(gps.satellites.value()) : "null");
+  line += ",\"satellites_visible\":" + String(visible_tracked_satellite_count());
+  line += ",\"hdop\":" + (gps.hdop.isValid() ? String(gps.hdop.hdop(), 1) : "null");
+  line += ",\"utc\":" + json_string(format_date_time());
+  line += "}";
+  line += ",\"lora\":{";
+  line += "\"status\":" + json_string(g_radio_ready ? g_lora_status : "OFF");
+  line += ",\"count\":" + String(g_logged_lora_count);
+  line += ",\"last_message\":" + json_string(g_last_lora_message);
+  line += ",\"last_time\":" + json_string(g_last_lora_timestamp);
+  line += ",\"last_rssi\":" + String(g_last_lora_rssi, 1);
+  line += ",\"last_snr\":" + String(g_last_lora_snr, 1);
+  line += "}";
+  line += ",\"wifi\":[";
+  for (size_t i = 0; i < g_wifi_scan_count; ++i) {
+    if (i > 0) {
+      line += ",";
+    }
+    line += "{";
+    line += "\"ssid\":" + json_string(g_wifi_scan_results[i].ssid);
+    line += ",\"bssid\":" + json_string(g_wifi_scan_results[i].bssid);
+    line += ",\"rssi\":" + String(g_wifi_scan_results[i].rssi);
+    line += ",\"channel\":" + String(g_wifi_scan_results[i].channel);
+    line += ",\"auth\":" + json_string(wifi_auth_name(g_wifi_scan_results[i].encryption));
+    line += "}";
+  }
+  line += "]";
+  line += ",\"bluetooth\":{";
+  line += "\"mac\":" + json_string(bluetooth_mac_address());
+  line += ",\"supported\":true";
+  line += "}";
+  line += "}";
+  return line;
+}
+
+void append_jsonl_snapshot_if_needed() {
+  const uint32_t now = millis();
+  if (now - g_last_json_snapshot_ms < harvest_log_config::SNAPSHOT_INTERVAL_MS) {
+    return;
+  }
+  if (!open_jsonl_log_file_if_needed()) {
+    return;
+  }
+
+  const String line = build_jsonl_snapshot();
+  const size_t expected_bytes = line.length() + 2;
+  size_t written_bytes = g_jsonl_log_file.print(line);
+  written_bytes += g_jsonl_log_file.print("\r\n");
+  g_jsonl_log_file.flush();
+
+  if (written_bytes < expected_bytes) {
+    mark_sd_unavailable();
+    return;
+  }
+
+  g_last_json_snapshot_ms = now;
+  ++g_logged_json_count;
+  g_needs_redraw = true;
 }
 
 void append_nmea_log(const String& sentence) {
@@ -1223,7 +1549,11 @@ void handle_radio_events() {
   if (state == RADIOLIB_ERR_NONE) {
     play_lora_receive_beep();
     append_lora_log(incoming);
-    g_lora_status = "RSSI " + String(radio.getRSSI(), 1) + " / SNR " + String(radio.getSNR(), 1);
+    g_last_lora_message = sanitize_lora_message(incoming);
+    g_last_lora_timestamp = format_log_timestamp();
+    g_last_lora_rssi = radio.getRSSI();
+    g_last_lora_snr = radio.getSNR();
+    g_lora_status = "RSSI " + String(g_last_lora_rssi, 1) + " / SNR " + String(g_last_lora_snr, 1);
   } else {
     g_lora_status = "Read error " + String(state);
   }
@@ -1296,14 +1626,32 @@ void handle_keyboard_input() {
         return;
       }
     }
+    if (g_display_mode == DisplayMode::SignalBars) {
+      int indices[48];
+      const size_t total_bars = collect_signal_satellite_indices(indices, sizeof(indices) / sizeof(indices[0]));
+      const size_t visible_bars = 7;
+      const size_t max_scroll = total_bars > visible_bars ? total_bars - visible_bars : 0;
+      if (move_up && g_signal_scroll_offset > 0) {
+        --g_signal_scroll_offset;
+        g_needs_redraw = true;
+        return;
+      }
+      if (move_down && g_signal_scroll_offset < max_scroll) {
+        ++g_signal_scroll_offset;
+        g_needs_redraw = true;
+        return;
+      }
+    }
 
     if (move_left) {
       g_display_mode = previous_mode(g_display_mode);
       g_text_scroll_offset = 0;
+      g_signal_scroll_offset = 0;
       g_needs_redraw = true;
     } else if (move_right) {
       g_display_mode = next_mode(g_display_mode);
       g_text_scroll_offset = 0;
+      g_signal_scroll_offset = 0;
       g_needs_redraw = true;
     }
     return;
@@ -1479,10 +1827,13 @@ void draw_text_mode() {
   lines[line_count++] = "Cnt : G" + String(static_cast<unsigned long>(g_logged_sentence_count)) + " L" +
                         String(static_cast<unsigned long>(g_logged_lora_count)) + " B:" +
                         String(g_beep_enabled ? "ON" : "OFF");
+  lines[line_count++] = "JCnt: " + String(static_cast<unsigned long>(g_logged_json_count));
   lines[line_count++] = "Mode: " + g_gnss_mode;
   lines[line_count++] = "Ver : " + fit_text(g_gnss_version, 24);
+  lines[line_count++] = "WiFi: " + String(g_wifi_scan_count) + " BT:OK";
   lines[line_count++] = "GFil: " + log_path_label(g_gps_log_path);
   lines[line_count++] = "LFil: " + log_path_label(g_lora_log_path);
+  lines[line_count++] = "JFil: " + log_path_label(g_jsonl_log_path);
 
   const size_t max_scroll = max_text_scroll_offset(line_count);
   if (g_text_scroll_offset > max_scroll) {
@@ -1499,8 +1850,8 @@ void draw_text_mode() {
     display.print(lines[line_index]);
   }
 
-  draw_scroll_indicator(g_text_scroll_offset > 0, g_text_scroll_offset < max_scroll,
-                        text_mode_config::TOP_Y, display.height() - 24);
+  const int scrollbar_bottom = text_mode_config::TOP_Y + static_cast<int>(visible_lines) * text_mode_config::LINE_HEIGHT - 1;
+  draw_content_scrollbar(text_mode_config::TOP_Y, scrollbar_bottom, line_count, visible_lines, g_text_scroll_offset);
 }
 
 void draw_satellite_mode() {
@@ -1595,6 +1946,65 @@ void draw_satellite_mode() {
   display.setTextColor(TFT_MAGENTA, TFT_BLACK);
   display.setCursor(170, 110);
   display.printf("Q%02d", vis_qzs);
+}
+
+void draw_signal_bars_mode() {
+  auto& display = g_canvas;
+  draw_common_frame("Signal");
+
+  const int chart_x = 36;
+  const int chart_y = 28;
+  const int chart_w = 194;
+  const int bar_h = 11;
+  const int bar_gap = 2;
+  const int max_bars = 7;
+  int selected_indices[48];
+  const size_t total_count = collect_signal_satellite_indices(selected_indices, sizeof(selected_indices) / sizeof(selected_indices[0]));
+  const size_t visible_count = total_count > static_cast<size_t>(max_bars) ? static_cast<size_t>(max_bars) : total_count;
+  const size_t max_scroll = total_count > visible_count ? total_count - visible_count : 0;
+  if (g_signal_scroll_offset > max_scroll) {
+    g_signal_scroll_offset = max_scroll;
+  }
+
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setCursor(0, 22);
+  display.printf("Vis:%d Used:%s",
+                 visible_tracked_satellite_count(),
+                 format_uint_value(gps.satellites.isValid(), gps.satellites.value()).c_str());
+
+  if (total_count == 0) {
+    display.setCursor(48, 60);
+    display.setTextColor(TFT_ORANGE, TFT_BLACK);
+    display.print("No SNR data yet");
+    return;
+  }
+
+  for (size_t row = 0; row < visible_count; ++row) {
+    const TrackedSatellite& sat = g_tracked_satellites[selected_indices[g_signal_scroll_offset + row]];
+    const int y = chart_y + row * (bar_h + bar_gap);
+    const int value_w = sat.snr > 0 ? (chart_w * sat.snr) / 60 : 0;
+    const uint16_t color = satellite_system_color(sat.system);
+
+    display.setTextColor(color, TFT_BLACK);
+    display.setCursor(0, y + 2);
+    display.printf("%s%02u", satellite_system_label(sat.system), static_cast<unsigned>(sat.id));
+    display.drawRect(chart_x, y, chart_w, bar_h, TFT_DARKGREY);
+    if (value_w > 0) {
+      display.fillRect(chart_x + 1, y + 1, value_w - 2 > 0 ? value_w - 2 : 1, bar_h - 2, color);
+    }
+    display.setTextColor(TFT_WHITE, TFT_BLACK);
+    display.setCursor(chart_x + chart_w - 24, y + 2);
+    display.printf("%2d", sat.snr);
+  }
+
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  display.setCursor(chart_x, 118);
+  display.print("0");
+  display.setCursor(chart_x + chart_w / 2 - 6, 118);
+  display.print("30");
+  display.setCursor(chart_x + chart_w - 12, 118);
+  display.print("60");
+  draw_vertical_scrollbar(235, chart_y, max_bars * (bar_h + bar_gap) - bar_gap, total_count, visible_count, g_signal_scroll_offset);
 }
 
 void draw_compass_mode() {
@@ -1735,7 +2145,8 @@ void draw_explorer_mode() {
     for (size_t i = 0; i < g_explorer_file_line_count; ++i) {
       display.println(g_explorer_file_lines[i]);
     }
-    draw_scroll_indicator(g_explorer_top_line > 0, g_explorer_file_has_more, 22, display.height() - 24);
+    const size_t total_lines = g_explorer_top_line + g_explorer_file_line_count + (g_explorer_file_has_more ? 1 : 0);
+    draw_content_scrollbar(22, display.height() - 24, total_lines, g_explorer_file_line_count, g_explorer_top_line);
     return;
   }
 
@@ -1764,10 +2175,7 @@ void draw_explorer_mode() {
                    size_label.c_str());
   }
 
-  draw_scroll_indicator(g_explorer_scroll_offset > 0,
-                        g_explorer_scroll_offset + visible_entries < g_explorer_entry_count,
-                        22,
-                        display.height() - 24);
+  draw_content_scrollbar(22, display.height() - 24, g_explorer_entry_count, visible_entries, g_explorer_scroll_offset);
 }
 
 void draw_ui() {
@@ -1782,6 +2190,9 @@ void draw_ui() {
           break;
         case DisplayMode::Satellites:
           draw_satellite_mode();
+          break;
+        case DisplayMode::SignalBars:
+          draw_signal_bars_mode();
           break;
         case DisplayMode::Compass:
           draw_compass_mode();
@@ -1819,6 +2230,9 @@ void setup() {
   g_canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
   g_canvas.setTextFont(1);
   g_canvas.setTextSize(1);
+  WiFi.mode(WIFI_MODE_STA);
+  WiFi.disconnect(false, false);
+  WiFi.setSleep(false);
 
   init_spi_bus();
   GPSSerial.begin(gps_config::UART_BAUD, SERIAL_8N1, board_pins::GPS_RX, board_pins::GPS_TX);
@@ -1866,9 +2280,13 @@ void loop() {
 
     update_status();
 
+    refresh_wireless_scans();
+    append_jsonl_snapshot_if_needed();
+
     if (M5Cardputer.BtnA.wasClicked()) {
       g_display_mode = next_mode(g_display_mode);
       g_text_scroll_offset = 0;
+      g_signal_scroll_offset = 0;
       g_needs_redraw = true;
     }
   }
