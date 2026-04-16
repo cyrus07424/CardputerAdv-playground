@@ -25,8 +25,11 @@ namespace gps_config {
 constexpr uint32_t UART_BAUD = 115200;
 constexpr uint32_t UI_REFRESH_MS = 1000;
 constexpr uint32_t SD_RETRY_MS = 3000;
+constexpr uint32_t INFO_REFRESH_MS = 30000;
+constexpr uint32_t QUERY_TIMEOUT_MS = 400;
 constexpr float SPEED_MAX_KMH = 120.0f;
 constexpr size_t NMEA_SENTENCE_MAX_LEN = 120;
+constexpr size_t QUERY_LINE_MAX_LEN = 127;
 }
 
 namespace lora_config {
@@ -44,15 +47,23 @@ constexpr uint16_t BEEP_DURATION_MS = 80;
 
 namespace explorer_config {
 constexpr size_t MAX_ENTRIES = 64;
-constexpr size_t VISIBLE_ENTRIES = 7;
-constexpr size_t VISIBLE_LINES = 6;
+constexpr size_t MAX_VISIBLE_ENTRIES = 9;
+constexpr size_t MAX_VISIBLE_LINES = 8;
 constexpr size_t PATH_LABEL_LEN = 28;
 constexpr size_t ENTRY_LABEL_LEN = 29;
 constexpr size_t LINE_LABEL_LEN = 30;
+constexpr int LIST_BODY_Y = 32;
+constexpr int FILE_BODY_Y = 42;
 }
 
 namespace menu_config {
 constexpr size_t ITEM_COUNT = 3;
+}
+
+namespace text_mode_config {
+constexpr size_t MAX_LINES = 16;
+constexpr int TOP_Y = 22;
+constexpr int LINE_HEIGHT = 10;
 }
 
 namespace keyboard_hid {
@@ -86,6 +97,7 @@ SX1262 radio = new Module(
     board_pins::LORA_RST,
     board_pins::LORA_BUSY,
     SPI);
+M5Canvas g_canvas(&M5Cardputer.Display);
 USBMSC g_usb_msc;
 File g_gps_log_file;
 File g_lora_log_file;
@@ -102,13 +114,17 @@ String g_status = "Booting...";
 String g_gps_log_path;
 String g_lora_log_path;
 String g_nmea_sentence;
+String g_gnss_version = "-";
+String g_gnss_mode = "-";
 String g_lora_status = "LoRa init...";
 String g_usb_status = "Select from menu";
 uint32_t g_last_draw_ms = 0;
 uint32_t g_last_data_ms = 0;
+uint32_t g_last_gnss_info_ms = 0;
 uint32_t g_last_sd_check_ms = 0;
 uint32_t g_logged_sentence_count = 0;
 uint32_t g_logged_lora_count = 0;
+size_t g_text_scroll_offset = 0;
 DisplayMode g_display_mode = DisplayMode::Text;
 AppMode g_app_mode = AppMode::Menu;
 size_t g_menu_selected_index = 0;
@@ -124,7 +140,7 @@ bool g_explorer_loaded = false;
 bool g_explorer_viewing_file = false;
 String g_explorer_file_path;
 uint32_t g_explorer_top_line = 0;
-String g_explorer_file_lines[explorer_config::VISIBLE_LINES];
+String g_explorer_file_lines[explorer_config::MAX_VISIBLE_LINES];
 size_t g_explorer_file_line_count = 0;
 bool g_explorer_file_has_more = false;
 
@@ -170,6 +186,72 @@ String format_log_timestamp() {
     return utc;
   }
   return "millis=" + String(millis());
+}
+
+String gnss_mode_name(const String& mode_code) {
+  if (mode_code == "G") {
+    return "GPS";
+  }
+  if (mode_code == "B") {
+    return "BDS";
+  }
+  if (mode_code == "R") {
+    return "GLONASS";
+  }
+  if (mode_code == "E") {
+    return "GALILEO";
+  }
+  if (mode_code == "Q") {
+    return "QZSS";
+  }
+  if (mode_code.length() == 0) {
+    return "-";
+  }
+  return mode_code;
+}
+
+size_t visible_text_line_count() {
+  const int content_height = M5Cardputer.Display.height() - text_mode_config::TOP_Y - 12;
+  const int visible = content_height / text_mode_config::LINE_HEIGHT;
+  return visible > 0 ? static_cast<size_t>(visible) : 1;
+}
+
+size_t visible_explorer_file_lines() {
+  const int content_height = M5Cardputer.Display.height() - explorer_config::FILE_BODY_Y - 12;
+  const int visible = content_height / text_mode_config::LINE_HEIGHT;
+  if (visible <= 0) {
+    return 1;
+  }
+  const size_t visible_lines = static_cast<size_t>(visible);
+  return visible_lines < explorer_config::MAX_VISIBLE_LINES ? visible_lines : explorer_config::MAX_VISIBLE_LINES;
+}
+
+size_t visible_explorer_entries() {
+  const int content_height = M5Cardputer.Display.height() - explorer_config::LIST_BODY_Y - 12;
+  const int visible = content_height / text_mode_config::LINE_HEIGHT;
+  if (visible <= 0) {
+    return 1;
+  }
+  const size_t visible_lines = static_cast<size_t>(visible);
+  return visible_lines < explorer_config::MAX_VISIBLE_ENTRIES ? visible_lines : explorer_config::MAX_VISIBLE_ENTRIES;
+}
+
+size_t max_text_scroll_offset(size_t line_count) {
+  const size_t visible_lines = visible_text_line_count();
+  return line_count > visible_lines ? line_count - visible_lines : 0;
+}
+
+void draw_scroll_indicator(bool can_scroll_up, bool can_scroll_down, int top_y, int bottom_y) {
+  auto& display = g_canvas;
+  display.setTextColor(TFT_CYAN, TFT_BLACK);
+  if (can_scroll_up) {
+    display.setCursor(display.width() - 6, top_y);
+    display.print("^");
+  }
+  if (can_scroll_down) {
+    display.setCursor(display.width() - 6, bottom_y);
+    display.print("v");
+  }
 }
 
 String fit_text(const String& text, size_t max_len) {
@@ -230,6 +312,13 @@ DisplayMode next_mode(DisplayMode mode) {
   return static_cast<DisplayMode>(next);
 }
 
+DisplayMode previous_mode(DisplayMode mode) {
+  const uint8_t count = static_cast<uint8_t>(DisplayMode::Count);
+  const uint8_t current = static_cast<uint8_t>(mode);
+  const uint8_t previous = (current + count - 1) % count;
+  return static_cast<DisplayMode>(previous);
+}
+
 double normalized_course() {
   if (!gps.course.isValid()) {
     return 0.0;
@@ -288,6 +377,19 @@ String parent_path(const String& path) {
     return "/";
   }
   return path.substring(0, slash);
+}
+
+String explorer_child_path(const String& entry_name) {
+  if (entry_name.length() == 0) {
+    return g_explorer_path;
+  }
+  if (entry_name[0] == '/') {
+    return entry_name;
+  }
+  if (is_root_path(g_explorer_path)) {
+    return "/" + entry_name;
+  }
+  return g_explorer_path + "/" + entry_name;
 }
 
 bool explorer_entry_less(bool lhs_is_dir,
@@ -377,7 +479,8 @@ void insert_explorer_entry(const String& name, const String& path, bool is_dir, 
 
 void load_explorer_file_page() {
   while (true) {
-    for (size_t i = 0; i < explorer_config::VISIBLE_LINES; ++i) {
+    const size_t visible_lines = visible_explorer_file_lines();
+    for (size_t i = 0; i < explorer_config::MAX_VISIBLE_LINES; ++i) {
       g_explorer_file_lines[i] = "";
     }
     g_explorer_file_line_count = 0;
@@ -401,7 +504,7 @@ void load_explorer_file_page() {
       if (visual_line_index++ < g_explorer_top_line) {
         return true;
       }
-      if (g_explorer_file_line_count < explorer_config::VISIBLE_LINES) {
+      if (g_explorer_file_line_count < visible_lines) {
         g_explorer_file_lines[g_explorer_file_line_count++] = line;
         return true;
       }
@@ -485,7 +588,7 @@ void refresh_explorer_directory() {
 
   File entry = dir.openNextFile();
   while (entry && g_explorer_entry_count < explorer_config::MAX_ENTRIES) {
-    const String path = String(entry.name());
+    const String path = explorer_child_path(String(entry.name()));
     insert_explorer_entry(log_path_label(path), path, entry.isDirectory(), entry.size());
     close_file(entry);
     entry = dir.openNextFile();
@@ -496,10 +599,11 @@ void refresh_explorer_directory() {
 }
 
 void ensure_explorer_selection_visible() {
+  const size_t visible_entries = visible_explorer_entries();
   if (g_explorer_selected_index < g_explorer_scroll_offset) {
     g_explorer_scroll_offset = g_explorer_selected_index;
-  } else if (g_explorer_selected_index >= g_explorer_scroll_offset + explorer_config::VISIBLE_ENTRIES) {
-    g_explorer_scroll_offset = g_explorer_selected_index - explorer_config::VISIBLE_ENTRIES + 1;
+  } else if (g_explorer_selected_index >= g_explorer_scroll_offset + visible_entries) {
+    g_explorer_scroll_offset = g_explorer_selected_index - visible_entries + 1;
   }
 }
 
@@ -645,6 +749,8 @@ void enter_harvest_mode() {
     stop_usb_storage_mode();
   }
   g_app_mode = AppMode::Harvest;
+  g_last_gnss_info_ms = 0;
+  g_text_scroll_offset = 0;
   update_status();
   g_needs_redraw = true;
 }
@@ -828,6 +934,87 @@ void handle_completed_nmea_sentence() {
   g_nmea_sentence = "";
 }
 
+void handle_gnss_serial_char(char c) {
+  gps.encode(c);
+
+  if (c == '\r') {
+    return;
+  }
+  if (c == '\n') {
+    handle_completed_nmea_sentence();
+    return;
+  }
+  if (g_nmea_sentence.length() < gps_config::NMEA_SENTENCE_MAX_LEN) {
+    g_nmea_sentence += c;
+  } else {
+    g_nmea_sentence = "";
+  }
+}
+
+String extract_gnss_field(const String& line, const char* key) {
+  const int start = line.indexOf(key);
+  if (start < 0) {
+    return "";
+  }
+
+  const int value_start = start + static_cast<int>(strlen(key));
+  int value_end = line.indexOf('*', value_start);
+  if (value_end < 0) {
+    value_end = line.length();
+  }
+  return line.substring(value_start, value_end);
+}
+
+String query_gnss_value(const char* command, const char* key) {
+  GPSSerial.print(command);
+
+  String line;
+  const uint32_t started_ms = millis();
+  while (millis() - started_ms < gps_config::QUERY_TIMEOUT_MS) {
+    while (GPSSerial.available() > 0) {
+      const char c = static_cast<char>(GPSSerial.read());
+      handle_gnss_serial_char(c);
+
+      if (c == '\r') {
+        continue;
+      }
+      if (c == '\n') {
+        const String value = extract_gnss_field(line, key);
+        if (value.length() > 0) {
+          return value;
+        }
+        line = "";
+        continue;
+      }
+
+      if (line.length() < gps_config::QUERY_LINE_MAX_LEN) {
+        line += c;
+      }
+    }
+  }
+  return "";
+}
+
+void refresh_gnss_info(bool force = false) {
+  const uint32_t now = millis();
+  if (!force && now - g_last_gnss_info_ms < gps_config::INFO_REFRESH_MS) {
+    return;
+  }
+  g_last_gnss_info_ms = now;
+
+  const String version = query_gnss_value("$PCAS06,0*1B\r\n", "SW=");
+  if (version.length() > 0 && version != g_gnss_version) {
+    g_gnss_version = version;
+    g_needs_redraw = true;
+  }
+
+  const String mode = gnss_mode_name(query_gnss_value("$PCAS06,2*19\r\n", "MO="));
+  if (mode.length() > 0 && mode != g_gnss_mode) {
+    g_gnss_mode = mode;
+    g_needs_redraw = true;
+  }
+}
+
 void play_lora_receive_beep() {
   if (!g_beep_enabled) {
     return;
@@ -938,6 +1125,34 @@ void handle_keyboard_input() {
     return;
   }
 
+  if (g_app_mode == AppMode::Harvest) {
+    if (g_display_mode == DisplayMode::Text) {
+      const size_t text_line_count = 12;
+      const size_t max_scroll = max_text_scroll_offset(text_line_count);
+      if (move_up && g_text_scroll_offset > 0) {
+        --g_text_scroll_offset;
+        g_needs_redraw = true;
+        return;
+      }
+      if (move_down && g_text_scroll_offset < max_scroll) {
+        ++g_text_scroll_offset;
+        g_needs_redraw = true;
+        return;
+      }
+    }
+
+    if (move_left) {
+      g_display_mode = previous_mode(g_display_mode);
+      g_text_scroll_offset = 0;
+      g_needs_redraw = true;
+    } else if (move_right) {
+      g_display_mode = next_mode(g_display_mode);
+      g_text_scroll_offset = 0;
+      g_needs_redraw = true;
+    }
+    return;
+  }
+
   if (g_app_mode != AppMode::Explorer) {
     return;
   }
@@ -947,6 +1162,7 @@ void handle_keyboard_input() {
   }
 
   if (g_explorer_viewing_file) {
+    const size_t visible_lines = visible_explorer_file_lines();
     if (move_up && g_explorer_top_line > 0) {
       --g_explorer_top_line;
       load_explorer_file_page();
@@ -955,12 +1171,12 @@ void handle_keyboard_input() {
       ++g_explorer_top_line;
       load_explorer_file_page();
       g_needs_redraw = true;
-    } else if (move_left && g_explorer_top_line >= explorer_config::VISIBLE_LINES) {
-      g_explorer_top_line -= explorer_config::VISIBLE_LINES;
+    } else if (move_left && g_explorer_top_line >= visible_lines) {
+      g_explorer_top_line -= visible_lines;
       load_explorer_file_page();
       g_needs_redraw = true;
     } else if (accept && g_explorer_file_has_more) {
-      g_explorer_top_line += explorer_config::VISIBLE_LINES;
+      g_explorer_top_line += visible_lines;
       load_explorer_file_page();
       g_needs_redraw = true;
     } else if (status.enter) {
@@ -989,7 +1205,7 @@ void handle_keyboard_input() {
 }
 
 void draw_battery_status(int width) {
-  auto& display = M5Cardputer.Display;
+  auto& display = g_canvas;
   const int battery_level = M5.Power.getBatteryLevel();
   const int icon_x = width - 24;
   const int icon_y = 3;
@@ -1035,7 +1251,7 @@ void update_status() {
 }
 
 void draw_common_frame(const char* title) {
-  auto& display = M5Cardputer.Display;
+  auto& display = g_canvas;
   const int width = display.width();
   const int height = display.height();
 
@@ -1055,13 +1271,15 @@ void draw_common_frame(const char* title) {
   display.setCursor(0, height - 10);
   if (g_app_mode == AppMode::Explorer) {
     display.print("Cur mv Ent ok Esc/BS bk");
+  } else if (g_app_mode == AppMode::Harvest && g_display_mode == DisplayMode::Text) {
+    display.print("U/D:Scr L/R:Mode Esc:Menu");
   } else {
-    display.printf("BtnA:%s Esc:Menu", mode_name(g_display_mode));
+    display.printf("BtnA/Cur:%s Esc:Menu", mode_name(g_display_mode));
   }
 }
 
 void draw_menu_mode() {
-  auto& display = M5Cardputer.Display;
+  auto& display = g_canvas;
   const int width = display.width();
   const int height = display.height();
   display.fillScreen(TFT_BLACK);
@@ -1087,31 +1305,50 @@ void draw_menu_mode() {
 }
 
 void draw_text_mode() {
-  auto& display = M5Cardputer.Display;
+  auto& display = g_canvas;
   draw_common_frame("Text");
   display.setTextColor(TFT_WHITE, TFT_BLACK);
-  display.setCursor(0, 22);
-  display.printf("Lat : %s\n", format_float_value(gps.location.isValid(), gps.location.lat(), 6).c_str());
-  display.printf("Lng : %s\n", format_float_value(gps.location.isValid(), gps.location.lng(), 6).c_str());
-  display.printf("Alt : %s m\n", format_float_value(gps.altitude.isValid(), gps.altitude.meters(), 1).c_str());
-  display.printf("Sat : %s  HDOP:%s\n",
-                 format_uint_value(gps.satellites.isValid(), gps.satellites.value()).c_str(),
-                 format_float_value(gps.hdop.isValid(), gps.hdop.hdop(), 1).c_str());
-  display.printf("Spd : %s km/h\n", format_float_value(gps.speed.isValid(), gps.speed.kmph(), 1).c_str());
-  display.printf("Crs : %s deg\n", format_float_value(gps.course.isValid(), gps.course.deg(), 1).c_str());
-  display.printf("UTC : %s\n", format_date_time().c_str());
-  display.printf("GPS : %s %lu\n", log_status_text().c_str(), static_cast<unsigned long>(g_logged_sentence_count));
-  display.printf("LoRa: %s\n", g_radio_ready ? g_lora_status.c_str() : "OFF");
-  display.printf("Cnt : G%lu L%lu B:%s\n",
-                  static_cast<unsigned long>(g_logged_sentence_count),
-                  static_cast<unsigned long>(g_logged_lora_count),
-                  g_beep_enabled ? "ON" : "OFF");
-  display.printf("GFil: %s\n", log_path_label(g_gps_log_path).c_str());
-  display.printf("LFil: %s\n", log_path_label(g_lora_log_path).c_str());
+  String lines[text_mode_config::MAX_LINES];
+  size_t line_count = 0;
+  lines[line_count++] = "Lat : " + format_float_value(gps.location.isValid(), gps.location.lat(), 6);
+  lines[line_count++] = "Lng : " + format_float_value(gps.location.isValid(), gps.location.lng(), 6);
+  lines[line_count++] = "Alt : " + format_float_value(gps.altitude.isValid(), gps.altitude.meters(), 1) + " m";
+  lines[line_count++] = "Sat : " + format_uint_value(gps.satellites.isValid(), gps.satellites.value()) +
+                        "  HDOP:" + format_float_value(gps.hdop.isValid(), gps.hdop.hdop(), 1);
+  lines[line_count++] = "Spd : " + format_float_value(gps.speed.isValid(), gps.speed.kmph(), 1) + " km/h";
+  lines[line_count++] = "Crs : " + format_float_value(gps.course.isValid(), gps.course.deg(), 1) + " deg";
+  lines[line_count++] = "UTC : " + format_date_time();
+  lines[line_count++] = "GPS : " + log_status_text() + " " + String(static_cast<unsigned long>(g_logged_sentence_count));
+  lines[line_count++] = "LoRa: " + String(g_radio_ready ? g_lora_status.c_str() : "OFF");
+  lines[line_count++] = "Cnt : G" + String(static_cast<unsigned long>(g_logged_sentence_count)) + " L" +
+                        String(static_cast<unsigned long>(g_logged_lora_count)) + " B:" +
+                        String(g_beep_enabled ? "ON" : "OFF");
+  lines[line_count++] = "Mode: " + g_gnss_mode;
+  lines[line_count++] = "Ver : " + fit_text(g_gnss_version, 24);
+  lines[line_count++] = "GFil: " + log_path_label(g_gps_log_path);
+  lines[line_count++] = "LFil: " + log_path_label(g_lora_log_path);
+
+  const size_t max_scroll = max_text_scroll_offset(line_count);
+  if (g_text_scroll_offset > max_scroll) {
+    g_text_scroll_offset = max_scroll;
+  }
+
+  const size_t visible_lines = visible_text_line_count();
+  for (size_t i = 0; i < visible_lines; ++i) {
+    const size_t line_index = g_text_scroll_offset + i;
+    if (line_index >= line_count) {
+      break;
+    }
+    display.setCursor(0, text_mode_config::TOP_Y + static_cast<int>(i) * text_mode_config::LINE_HEIGHT);
+    display.print(lines[line_index]);
+  }
+
+  draw_scroll_indicator(g_text_scroll_offset > 0, g_text_scroll_offset < max_scroll,
+                        text_mode_config::TOP_Y, display.height() - 24);
 }
 
 void draw_satellite_mode() {
-  auto& display = M5Cardputer.Display;
+  auto& display = g_canvas;
   const int width = display.width();
   const int center_x = width / 2;
   const int center_y = 68;
@@ -1144,7 +1381,7 @@ void draw_satellite_mode() {
 }
 
 void draw_compass_mode() {
-  auto& display = M5Cardputer.Display;
+  auto& display = g_canvas;
   const int width = display.width();
   const int center_x = width / 2;
   const int center_y = 72;
@@ -1185,7 +1422,7 @@ void draw_compass_mode() {
 }
 
 void draw_speed_mode() {
-  auto& display = M5Cardputer.Display;
+  auto& display = g_canvas;
   const int width = display.width();
   const int height = display.height();
   const int center_x = width / 2;
@@ -1228,7 +1465,7 @@ void draw_speed_mode() {
 }
 
 void draw_usb_storage_mode() {
-  auto& display = M5Cardputer.Display;
+  auto& display = g_canvas;
   const int width = display.width();
   const int height = display.height();
   display.fillScreen(TFT_BLACK);
@@ -1255,7 +1492,7 @@ void draw_usb_storage_mode() {
 }
 
 void draw_explorer_mode() {
-  auto& display = M5Cardputer.Display;
+  auto& display = g_canvas;
   draw_common_frame("Explorer");
   display.setTextColor(TFT_YELLOW, TFT_BLACK);
   display.setCursor(0, 22);
@@ -1281,6 +1518,7 @@ void draw_explorer_mode() {
     for (size_t i = 0; i < g_explorer_file_line_count; ++i) {
       display.println(g_explorer_file_lines[i]);
     }
+    draw_scroll_indicator(g_explorer_top_line > 0, g_explorer_file_has_more, 22, display.height() - 24);
     return;
   }
 
@@ -1291,7 +1529,8 @@ void draw_explorer_mode() {
     return;
   }
 
-  for (size_t row = 0; row < explorer_config::VISIBLE_ENTRIES; ++row) {
+  const size_t visible_entries = visible_explorer_entries();
+  for (size_t row = 0; row < visible_entries; ++row) {
     const size_t index = g_explorer_scroll_offset + row;
     if (index >= g_explorer_entry_count) {
       break;
@@ -1307,12 +1546,14 @@ void draw_explorer_mode() {
                    fit_text(g_explorer_entry_names[index], name_width).c_str(),
                    size_label.c_str());
   }
+
+  draw_scroll_indicator(g_explorer_scroll_offset > 0,
+                        g_explorer_scroll_offset + visible_entries < g_explorer_entry_count,
+                        22,
+                        display.height() - 24);
 }
 
 void draw_ui() {
-  auto& display = M5Cardputer.Display;
-  display.startWrite();
-
   switch (g_app_mode) {
     case AppMode::Menu:
       draw_menu_mode();
@@ -1343,8 +1584,9 @@ void draw_ui() {
       draw_usb_storage_mode();
       break;
   }
-
-  display.endWrite();
+  M5Cardputer.Display.startWrite();
+  g_canvas.pushSprite(0, 0);
+  M5Cardputer.Display.endWrite();
 }
 
 void setup() {
@@ -1356,6 +1598,10 @@ void setup() {
   M5Cardputer.Display.setRotation(1);
   M5Cardputer.Display.setTextFont(1);
   M5Cardputer.Display.setTextSize(1);
+  g_canvas.setColorDepth(16);
+  g_canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
+  g_canvas.setTextFont(1);
+  g_canvas.setTextSize(1);
 
   init_spi_bus();
   GPSSerial.begin(gps_config::UART_BAUD, SERIAL_8N1, board_pins::GPS_RX, board_pins::GPS_TX);
@@ -1382,26 +1628,14 @@ void loop() {
   }
 
   if (g_app_mode == AppMode::Harvest) {
+    refresh_gnss_info();
     handle_radio_events();
 
     bool received_data = false;
     while (GPSSerial.available() > 0) {
       const char c = static_cast<char>(GPSSerial.read());
-      gps.encode(c);
+      handle_gnss_serial_char(c);
       received_data = true;
-
-      if (c == '\r') {
-        continue;
-      }
-      if (c == '\n') {
-        handle_completed_nmea_sentence();
-        continue;
-      }
-      if (g_nmea_sentence.length() < gps_config::NMEA_SENTENCE_MAX_LEN) {
-        g_nmea_sentence += c;
-      } else {
-        g_nmea_sentence = "";
-      }
     }
 
     if (received_data) {
@@ -1417,6 +1651,7 @@ void loop() {
 
     if (M5Cardputer.BtnA.wasClicked()) {
       g_display_mode = next_mode(g_display_mode);
+      g_text_scroll_offset = 0;
       g_needs_redraw = true;
     }
   }
