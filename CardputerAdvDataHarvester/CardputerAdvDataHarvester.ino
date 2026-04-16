@@ -27,6 +27,7 @@ constexpr uint32_t UI_REFRESH_MS = 1000;
 constexpr uint32_t SD_RETRY_MS = 3000;
 constexpr uint32_t INFO_REFRESH_MS = 30000;
 constexpr uint32_t QUERY_TIMEOUT_MS = 400;
+constexpr uint32_t SATELLITE_TIMEOUT_MS = 15000;
 constexpr float SPEED_MAX_KMH = 120.0f;
 constexpr size_t NMEA_SENTENCE_MAX_LEN = 120;
 constexpr size_t QUERY_LINE_MAX_LEN = 127;
@@ -89,6 +90,15 @@ enum class AppMode : uint8_t {
   UsbStorage
 };
 
+struct TrackedSatellite {
+  uint16_t id = 0;
+  int elevation = -1;
+  int azimuth = -1;
+  int snr = -1;
+  char system = '?';
+  uint32_t last_seen_ms = 0;
+};
+
 HardwareSerial GPSSerial(1);
 TinyGPSPlus gps;
 SX1262 radio = new Module(
@@ -125,6 +135,8 @@ uint32_t g_last_sd_check_ms = 0;
 uint32_t g_logged_sentence_count = 0;
 uint32_t g_logged_lora_count = 0;
 size_t g_text_scroll_offset = 0;
+TrackedSatellite g_tracked_satellites[48];
+size_t g_tracked_satellite_count = 0;
 DisplayMode g_display_mode = DisplayMode::Text;
 AppMode g_app_mode = AppMode::Menu;
 size_t g_menu_selected_index = 0;
@@ -390,6 +402,104 @@ String explorer_child_path(const String& entry_name) {
     return "/" + entry_name;
   }
   return g_explorer_path + "/" + entry_name;
+}
+
+char satellite_system_from_talker(const String& talker) {
+  if (talker == "GP") {
+    return 'P';
+  }
+  if (talker == "GL") {
+    return 'L';
+  }
+  if (talker == "GA") {
+    return 'A';
+  }
+  if (talker == "GB" || talker == "BD") {
+    return 'B';
+  }
+  if (talker == "GQ") {
+    return 'Q';
+  }
+  return '?';
+}
+
+const char* satellite_system_label(char system) {
+  switch (system) {
+    case 'P':
+      return "GPS";
+    case 'L':
+      return "GLN";
+    case 'A':
+      return "GAL";
+    case 'B':
+      return "BDS";
+    case 'Q':
+      return "QZS";
+    default:
+      return "UNK";
+  }
+}
+
+uint16_t satellite_system_color(char system) {
+  switch (system) {
+    case 'P':
+      return TFT_YELLOW;
+    case 'L':
+      return TFT_CYAN;
+    case 'A':
+      return 0x54BF;
+    case 'B':
+      return TFT_ORANGE;
+    case 'Q':
+      return TFT_MAGENTA;
+    default:
+      return TFT_LIGHTGREY;
+  }
+}
+
+int visible_tracked_satellite_count() {
+  int visible = 0;
+  const uint32_t now = millis();
+  for (size_t i = 0; i < g_tracked_satellite_count; ++i) {
+    if (now - g_tracked_satellites[i].last_seen_ms <= gps_config::SATELLITE_TIMEOUT_MS) {
+      ++visible;
+    }
+  }
+  return visible;
+}
+
+TrackedSatellite* find_tracked_satellite(char system, uint16_t id) {
+  for (size_t i = 0; i < g_tracked_satellite_count; ++i) {
+    if (g_tracked_satellites[i].system == system && g_tracked_satellites[i].id == id) {
+      return &g_tracked_satellites[i];
+    }
+  }
+
+  if (g_tracked_satellite_count < (sizeof(g_tracked_satellites) / sizeof(g_tracked_satellites[0]))) {
+    TrackedSatellite& sat = g_tracked_satellites[g_tracked_satellite_count++];
+    sat.id = id;
+    sat.system = system;
+    sat.elevation = -1;
+    sat.azimuth = -1;
+    sat.snr = -1;
+    sat.last_seen_ms = 0;
+    return &sat;
+  }
+
+  size_t oldest_index = 0;
+  for (size_t i = 1; i < g_tracked_satellite_count; ++i) {
+    if (g_tracked_satellites[i].last_seen_ms < g_tracked_satellites[oldest_index].last_seen_ms) {
+      oldest_index = i;
+    }
+  }
+  TrackedSatellite& sat = g_tracked_satellites[oldest_index];
+  sat.id = id;
+  sat.system = system;
+  sat.elevation = -1;
+  sat.azimuth = -1;
+  sat.snr = -1;
+  sat.last_seen_ms = 0;
+  return &sat;
 }
 
 bool explorer_entry_less(bool lhs_is_dir,
@@ -929,7 +1039,53 @@ void append_lora_log(const String& message) {
   g_needs_redraw = true;
 }
 
+String nmea_field(const String& sentence, size_t field_index) {
+  const int checksum = sentence.indexOf('*');
+  const int end = checksum >= 0 ? checksum : sentence.length();
+  int start = 0;
+  size_t current_index = 0;
+
+  for (int i = 0; i <= end; ++i) {
+    if (i == end || sentence[i] == ',') {
+      if (current_index == field_index) {
+        return sentence.substring(start, i);
+      }
+      start = i + 1;
+      ++current_index;
+    }
+  }
+  return "";
+}
+
+void parse_gsv_sentence(const String& sentence) {
+  if (sentence.length() < 6 || sentence[0] != '$') {
+    return;
+  }
+
+  const char system = satellite_system_from_talker(sentence.substring(1, 3));
+  const uint32_t now = millis();
+  for (size_t group = 0; group < 4; ++group) {
+    const size_t base = 4 + group * 4;
+    const String id_text = nmea_field(sentence, base);
+    if (id_text.length() == 0) {
+      continue;
+    }
+
+    TrackedSatellite* sat = find_tracked_satellite(system, static_cast<uint16_t>(id_text.toInt()));
+    if (!sat) {
+      continue;
+    }
+
+    sat->elevation = nmea_field(sentence, base + 1).toInt();
+    sat->azimuth = nmea_field(sentence, base + 2).toInt();
+    const String snr_text = nmea_field(sentence, base + 3);
+    sat->snr = snr_text.length() == 0 ? -1 : snr_text.toInt();
+    sat->last_seen_ms = now;
+  }
+}
+
 void handle_completed_nmea_sentence() {
+  parse_gsv_sentence(g_nmea_sentence);
   append_nmea_log(g_nmea_sentence);
   g_nmea_sentence = "";
 }
@@ -1349,35 +1505,96 @@ void draw_text_mode() {
 
 void draw_satellite_mode() {
   auto& display = g_canvas;
-  const int width = display.width();
-  const int center_x = width / 2;
-  const int center_y = 68;
-  const int radius = 34;
-  const uint32_t satellites = satellite_count();
-  const uint32_t dots = satellites > 16 ? 16 : satellites;
-
   draw_common_frame("Satellites");
-  display.drawCircle(center_x, center_y, radius, TFT_DARKGREY);
-  display.drawCircle(center_x, center_y, radius - 10, TFT_DARKGREY);
+  const int plot_center_x = 182;
+  const int plot_center_y = 70;
+  const int plot_radius = 42;
+  const uint32_t now = millis();
+  int vis_gps = 0;
+  int vis_gln = 0;
+  int vis_gal = 0;
+  int vis_bds = 0;
+  int vis_qzs = 0;
 
-  for (uint32_t i = 0; i < dots; ++i) {
-    const float angle = ((360.0f / dots) * i - 90.0f) * DEG_TO_RAD;
-    const int x = center_x + static_cast<int>(cosf(angle) * radius);
-    const int y = center_y + static_cast<int>(sinf(angle) * radius);
-    display.fillCircle(x, y, 4, TFT_GREENYELLOW);
+  display.drawCircle(plot_center_x, plot_center_y, plot_radius, TFT_DARKGREY);
+  display.drawCircle(plot_center_x, plot_center_y, plot_radius * 2 / 3, TFT_DARKGREY);
+  display.drawCircle(plot_center_x, plot_center_y, plot_radius / 3, TFT_DARKGREY);
+  display.drawLine(plot_center_x - plot_radius, plot_center_y, plot_center_x + plot_radius, plot_center_y, TFT_DARKGREY);
+  display.drawLine(plot_center_x, plot_center_y - plot_radius, plot_center_x, plot_center_y + plot_radius, TFT_DARKGREY);
+  display.setTextColor(TFT_CYAN, TFT_BLACK);
+  display.setCursor(plot_center_x - 3, plot_center_y - plot_radius - 10);
+  display.print("N");
+  display.setCursor(plot_center_x - 3, plot_center_y + plot_radius + 2);
+  display.print("S");
+  display.setCursor(plot_center_x - plot_radius - 10, plot_center_y - 3);
+  display.print("W");
+  display.setCursor(plot_center_x + plot_radius + 4, plot_center_y - 3);
+  display.print("E");
+
+  for (size_t i = 0; i < g_tracked_satellite_count; ++i) {
+    const TrackedSatellite& sat = g_tracked_satellites[i];
+    if (now - sat.last_seen_ms > gps_config::SATELLITE_TIMEOUT_MS || sat.elevation < 0 || sat.azimuth < 0) {
+      continue;
+    }
+
+    switch (sat.system) {
+      case 'P':
+        ++vis_gps;
+        break;
+      case 'L':
+        ++vis_gln;
+        break;
+      case 'A':
+        ++vis_gal;
+        break;
+      case 'B':
+        ++vis_bds;
+        break;
+      case 'Q':
+        ++vis_qzs;
+        break;
+    }
+
+    const float angle = (sat.azimuth - 90.0f) * DEG_TO_RAD;
+    const float radius = (90.0f - sat.elevation) * plot_radius / 90.0f;
+    const int x = plot_center_x + static_cast<int>(cosf(angle) * radius);
+    const int y = plot_center_y + static_cast<int>(sinf(angle) * radius);
+    const uint16_t color = satellite_system_color(sat.system);
+    display.fillCircle(x, y, 4, color);
+    display.drawCircle(x, y, 5, TFT_BLACK);
+    if (sat.id > 0) {
+      display.setTextColor(color, TFT_BLACK);
+      display.setCursor(x + 6, y - 3);
+      display.print(sat.id);
+    }
   }
 
   display.setTextColor(TFT_WHITE, TFT_BLACK);
-  display.setTextSize(4);
-  display.setCursor(center_x - 20, center_y - 16);
-  display.print(satellites);
-  display.setTextSize(1);
-  display.setCursor(center_x - 12, center_y + 18);
-  display.print("SAT");
-  display.setCursor(16, 96);
-  display.printf("HDOP: %s", format_float_value(gps.hdop.isValid(), gps.hdop.hdop(), 1).c_str());
-  display.setCursor(16, 108);
-  display.printf("Fix : %s", has_gps_fix() ? "YES" : "NO");
+  display.setCursor(0, 22);
+  display.printf("Fix : %s\n", has_gps_fix() ? "YES" : "NO");
+  display.printf("Used: %s\n", format_uint_value(gps.satellites.isValid(), gps.satellites.value()).c_str());
+  display.printf("Vis : %d\n", visible_tracked_satellite_count());
+  display.printf("Mode: %s\n", g_gnss_mode.c_str());
+  display.printf("HDOP: %s\n", format_float_value(gps.hdop.isValid(), gps.hdop.hdop(), 1).c_str());
+  display.printf("Spd : %s\n", format_float_value(gps.speed.isValid(), gps.speed.kmph(), 1).c_str());
+  display.printf("Alt : %s\n", format_float_value(gps.altitude.isValid(), gps.altitude.meters(), 0).c_str());
+  display.printf("UTC : %s\n", format_date_time().c_str());
+
+  display.setTextColor(TFT_YELLOW, TFT_BLACK);
+  display.setCursor(138, 100);
+  display.printf("P%02d", vis_gps);
+  display.setTextColor(TFT_CYAN, TFT_BLACK);
+  display.setCursor(170, 100);
+  display.printf("L%02d", vis_gln);
+  display.setTextColor(0x54BF, TFT_BLACK);
+  display.setCursor(202, 100);
+  display.printf("A%02d", vis_gal);
+  display.setTextColor(TFT_ORANGE, TFT_BLACK);
+  display.setCursor(138, 110);
+  display.printf("B%02d", vis_bds);
+  display.setTextColor(TFT_MAGENTA, TFT_BLACK);
+  display.setCursor(170, 110);
+  display.printf("Q%02d", vis_qzs);
 }
 
 void draw_compass_mode() {
