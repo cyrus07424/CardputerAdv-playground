@@ -10,10 +10,10 @@ constexpr int16_t RENDER_W = SCREEN_W;
 constexpr int16_t RENDER_H = SCREEN_H;
 constexpr uint8_t TEXTURE_SIZE = 8;
 
-constexpr int WORLD_W = 32;
-constexpr int WORLD_H = 18;
-constexpr int WORLD_D = 32;
-constexpr int WATER_LEVEL = 4;
+constexpr int WORLD_W = 64;
+constexpr int WORLD_H = 24;
+constexpr int WORLD_D = 64;
+constexpr int WATER_LEVEL = 6;
 
 constexpr uint32_t FRAME_INTERVAL_MS = 50;
 constexpr float MAX_DT_SEC = 0.05f;
@@ -27,9 +27,9 @@ constexpr float JUMP_VELOCITY = 5.2f;
 constexpr float TURN_SPEED_DEG = 110.0f;
 constexpr float LOOK_SPEED_DEG = 90.0f;
 constexpr float H_FOV_DEG = 68.0f;
-constexpr float RAY_MAX_DISTANCE = 24.0f;
+constexpr float RAY_MAX_DISTANCE = 30.0f;
 constexpr float TARGET_MAX_DISTANCE = 6.5f;
-constexpr int MAX_RAY_STEPS = 56;
+constexpr int MAX_RAY_STEPS = 72;
 constexpr uint32_t INITIAL_SEED = 1337U;
 }  // namespace app_config
 
@@ -46,7 +46,22 @@ enum BlockType : uint8_t {
   BLOCK_GLASS,
   BLOCK_BEDROCK,
   BLOCK_CACTUS,
+  BLOCK_COBBLE,
+  BLOCK_PLANKS,
+  BLOCK_SNOW,
+  BLOCK_CLAY,
+  BLOCK_RED_SAND,
   BLOCK_COUNT
+};
+
+enum BiomeType : uint8_t {
+  BIOME_PLAINS = 0,
+  BIOME_FOREST,
+  BIOME_DESERT,
+  BIOME_RED_DESERT,
+  BIOME_SNOW,
+  BIOME_ROCKY,
+  BIOME_WETLAND,
 };
 
 using Vec3 = pescado_core::Vec3;
@@ -147,11 +162,16 @@ constexpr uint8_t kSelectableBlocks[] = {
     BLOCK_GRASS,
     BLOCK_DIRT,
     BLOCK_STONE,
+    BLOCK_COBBLE,
     BLOCK_SAND,
+    BLOCK_RED_SAND,
     BLOCK_LOG,
+    BLOCK_PLANKS,
     BLOCK_LEAVES,
     BLOCK_BRICKS,
     BLOCK_GLASS,
+    BLOCK_SNOW,
+    BLOCK_CLAY,
     BLOCK_CACTUS,
 };
 
@@ -299,6 +319,11 @@ const char* block_name(uint8_t block) {
     case BLOCK_GLASS: return "Glass";
     case BLOCK_BEDROCK: return "Bedrock";
     case BLOCK_CACTUS: return "Cactus";
+    case BLOCK_COBBLE: return "Cobble";
+    case BLOCK_PLANKS: return "Planks";
+    case BLOCK_SNOW: return "Snow";
+    case BLOCK_CLAY: return "Clay";
+    case BLOCK_RED_SAND: return "RedSand";
     default: return "Air";
   }
 }
@@ -336,6 +361,11 @@ ColorRgb block_base_color(uint8_t block) {
     case BLOCK_GLASS: return make_rgb(164, 214, 224);
     case BLOCK_BEDROCK: return make_rgb(74, 74, 82);
     case BLOCK_CACTUS: return make_rgb(42, 154, 72);
+    case BLOCK_COBBLE: return make_rgb(112, 112, 118);
+    case BLOCK_PLANKS: return make_rgb(172, 134, 82);
+    case BLOCK_SNOW: return make_rgb(236, 242, 248);
+    case BLOCK_CLAY: return make_rgb(144, 154, 168);
+    case BLOCK_RED_SAND: return make_rgb(188, 112, 70);
     default: return make_rgb(0, 0, 0);
   }
 }
@@ -375,6 +405,14 @@ void build_block_textures() {
   const ColorRgb cactus = make_rgb(42, 154, 72);
   const ColorRgb cactus_dark = make_rgb(30, 108, 52);
   const ColorRgb cactus_core = make_rgb(104, 88, 48);
+  const ColorRgb cobble = make_rgb(112, 112, 118);
+  const ColorRgb plank = make_rgb(172, 134, 82);
+  const ColorRgb plank_dark = make_rgb(132, 98, 58);
+  const ColorRgb snow = make_rgb(236, 242, 248);
+  const ColorRgb snow_shadow = make_rgb(184, 204, 222);
+  const ColorRgb clay = make_rgb(144, 154, 168);
+  const ColorRgb clay_dark = make_rgb(118, 128, 144);
+  const ColorRgb red_sand = make_rgb(188, 112, 70);
 
   for (int block = 0; block < BLOCK_COUNT; ++block) {
     for (int face = 0; face < 3; ++face) {
@@ -460,6 +498,35 @@ void build_block_textures() {
                 }
               }
               break;
+            case BLOCK_COBBLE:
+              color = shade_rgb(cobble, 0.62f + (static_cast<float>(noise) / 255.0f) * 0.34f);
+              if (((x ^ y) & 1) == 0) {
+                color = shade_rgb(color, 0.88f);
+              }
+              break;
+            case BLOCK_PLANKS:
+              color = shade_rgb(plank, (y == 0 || y == 4) ? 0.78f : 0.98f);
+              if (x == 0 || x == 7) {
+                color = shade_rgb(plank_dark, 0.86f);
+              } else if (x == 3 || x == 4) {
+                color = shade_rgb(plank_dark, 0.72f);
+              }
+              break;
+            case BLOCK_SNOW:
+              if (face == FACE_TEXTURE_TOP) {
+                color = shade_rgb(snow, 0.92f + (static_cast<float>(noise) / 255.0f) * 0.10f);
+              } else if (face == FACE_TEXTURE_SIDE) {
+                color = y < 2 ? shade_rgb(snow, 0.96f) : shade_rgb(snow_shadow, 0.86f);
+              } else {
+                color = shade_rgb(snow_shadow, 0.78f);
+              }
+              break;
+            case BLOCK_CLAY:
+              color = shade_rgb(((y / 2) & 1) == 0 ? clay : clay_dark, 0.88f + (static_cast<float>(noise) / 255.0f) * 0.12f);
+              break;
+            case BLOCK_RED_SAND:
+              color = shade_rgb(red_sand, 0.82f + (static_cast<float>((noise + y * 11) & 0xFFU) / 255.0f) * 0.22f);
+              break;
             default:
               break;
           }
@@ -481,6 +548,111 @@ int top_solid_y(int x, int z) {
   return 0;
 }
 
+bool try_get_spawn_y(int x, int z, int& spawn_y) {
+  if (!in_world(x, 1, z)) {
+    return false;
+  }
+
+  const int surface_y = top_solid_y(x, z);
+  const uint8_t surface_block = get_block(x, surface_y, z);
+  if (surface_block == BLOCK_WATER ||
+      surface_block == BLOCK_LEAVES ||
+      surface_block == BLOCK_CACTUS) {
+    return false;
+  }
+
+  if (!in_world(x, surface_y + 1, z) || !in_world(x, surface_y + 2, z)) {
+    return false;
+  }
+
+  const uint8_t body_block = get_block(x, surface_y + 1, z);
+  const uint8_t head_block = get_block(x, surface_y + 2, z);
+  if (body_block != BLOCK_AIR || head_block != BLOCK_AIR) {
+    return false;
+  }
+
+  spawn_y = surface_y;
+  return true;
+}
+
+BiomeType biome_at(int x, int z) {
+  const float temperature = fbm_noise(x * 0.028f, z * 0.028f, g_seed ^ 0x1A2BU);
+  const float moisture = fbm_noise(x * 0.030f, z * 0.030f, g_seed ^ 0x2B3CU);
+  const float rugged = fbm_noise(x * 0.055f, z * 0.055f, g_seed ^ 0x3C4DU);
+  const float mesa = value_noise(x * 0.062f, z * 0.062f, g_seed ^ 0x4D5EU);
+
+  if (temperature < 0.25f) {
+    return BIOME_SNOW;
+  }
+  if (temperature > 0.77f && moisture < 0.24f) {
+    return mesa > 0.52f ? BIOME_RED_DESERT : BIOME_DESERT;
+  }
+  if (rugged > 0.70f && moisture < 0.62f) {
+    return BIOME_ROCKY;
+  }
+  if (moisture > 0.72f && rugged < 0.58f) {
+    return BIOME_WETLAND;
+  }
+  if (moisture > 0.53f) {
+    return BIOME_FOREST;
+  }
+  return BIOME_PLAINS;
+}
+
+int terrain_height_for(int x, int z, BiomeType biome) {
+  const float continental = fbm_noise(x * 0.022f, z * 0.022f, g_seed ^ 0x55AAU) * 2.0f - 1.0f;
+  const float hills = fbm_noise(x * 0.070f, z * 0.070f, g_seed ^ 0x91E1U) * 2.0f - 1.0f;
+  const float detail = value_noise(x * 0.24f, z * 0.24f, g_seed ^ 0x44B9U) * 2.0f - 1.0f;
+  const float ridge = fabsf(value_noise(x * 0.085f, z * 0.085f, g_seed ^ 0x77E3U) * 2.0f - 1.0f);
+
+  float height = static_cast<float>(app_config::WATER_LEVEL) +
+                 continental * 4.6f + hills * 2.8f + detail * 1.6f;
+
+  switch (biome) {
+    case BIOME_FOREST:
+      height += 0.8f;
+      break;
+    case BIOME_DESERT:
+      height -= 0.6f;
+      break;
+    case BIOME_RED_DESERT:
+      height += ridge * 3.6f;
+      break;
+    case BIOME_SNOW:
+      height += 1.8f;
+      break;
+    case BIOME_ROCKY:
+      height += ridge * 6.0f + 1.0f;
+      break;
+    case BIOME_WETLAND:
+      height -= 1.8f;
+      break;
+    default:
+      break;
+  }
+
+  return static_cast<int>(clampf(height, 2.0f, app_config::WORLD_H - 4.0f));
+}
+
+uint8_t surface_block_for_biome(BiomeType biome) {
+  switch (biome) {
+    case BIOME_DESERT: return BLOCK_SAND;
+    case BIOME_RED_DESERT: return BLOCK_RED_SAND;
+    case BIOME_SNOW: return BLOCK_SNOW;
+    case BIOME_ROCKY: return BLOCK_COBBLE;
+    default: return BLOCK_GRASS;
+  }
+}
+
+uint8_t filler_block_for_biome(BiomeType biome) {
+  switch (biome) {
+    case BIOME_DESERT: return BLOCK_SAND;
+    case BIOME_RED_DESERT: return BLOCK_RED_SAND;
+    case BIOME_WETLAND: return BLOCK_CLAY;
+    default: return BLOCK_DIRT;
+  }
+}
+
 void place_tree(int x, int y, int z) {
   if (y < app_config::WATER_LEVEL + 2 || y + 4 >= app_config::WORLD_H) {
     return;
@@ -499,12 +671,52 @@ void place_tree(int x, int y, int z) {
   }
 }
 
+void place_pine_tree(int x, int y, int z) {
+  if (y < app_config::WATER_LEVEL + 1 || y + 6 >= app_config::WORLD_H) {
+    return;
+  }
+
+  const int trunk_h = 4 + static_cast<int>(hash_coords(x, z, g_seed ^ 0xACEDU) % 2U);
+  for (int i = 1; i <= trunk_h; ++i) {
+    set_block(x, y + i, z, BLOCK_LOG);
+  }
+  for (int dy = 0; dy <= 3; ++dy) {
+    const int radius = (dy == 0) ? 2 : 1;
+    const int cy = y + trunk_h - dy;
+    for (int dx = -radius; dx <= radius; ++dx) {
+      for (int dz = -radius; dz <= radius; ++dz) {
+        if (abs(dx) + abs(dz) <= radius + 1) {
+          set_block(x + dx, cy, z + dz, BLOCK_LEAVES);
+        }
+      }
+    }
+  }
+  set_block(x, y + trunk_h + 1, z, BLOCK_LEAVES);
+}
+
 void place_cactus(int x, int y, int z, int height) {
   if (y < app_config::WATER_LEVEL + 1 || y + height >= app_config::WORLD_H) {
     return;
   }
   for (int i = 1; i <= height; ++i) {
     set_block(x, y + i, z, BLOCK_CACTUS);
+  }
+}
+
+void place_boulder(int x, int y, int z) {
+  const int radius = 1 + static_cast<int>(hash_coords(x, z, g_seed ^ 0xD00DU) % 2U);
+  for (int dx = -radius; dx <= radius; ++dx) {
+    for (int dz = -radius; dz <= radius; ++dz) {
+      for (int dy = 0; dy <= radius; ++dy) {
+        if (dx * dx + dz * dz + dy * dy <= radius * radius + 1) {
+          set_block(
+              x + dx,
+              y + dy + 1,
+              z + dz,
+              ((dx + dz + dy) & 1) == 0 ? BLOCK_COBBLE : BLOCK_STONE);
+        }
+      }
+    }
   }
 }
 
@@ -519,23 +731,23 @@ void reset_world() {
 
   for (int x = 0; x < app_config::WORLD_W; ++x) {
     for (int z = 0; z < app_config::WORLD_D; ++z) {
-      const float biome_noise = value_noise(x * 0.10f, z * 0.10f, g_seed ^ 0xA53CU);
-      const bool desert = biome_noise > 0.60f;
-      const float hills = fbm_noise(x * 0.12f, z * 0.12f, g_seed ^ 0x91E1U);
-      const float detail = value_noise(x * 0.33f, z * 0.33f, g_seed ^ 0x44B9U);
-      int height = 3 + static_cast<int>(hills * 7.0f + detail * 2.0f);
-      height = static_cast<int>(clampf(height, 2.0f, app_config::WORLD_H - 3.0f));
+      const BiomeType biome = biome_at(x, z);
+      const int height = terrain_height_for(x, z, biome);
+      const uint8_t surface = surface_block_for_biome(biome);
+      const uint8_t filler = filler_block_for_biome(biome);
 
       for (int y = 0; y <= height; ++y) {
         uint8_t block = BLOCK_STONE;
         if (y == 0) {
           block = BLOCK_BEDROCK;
-        } else if (desert) {
-          block = (y >= height - 3) ? BLOCK_SAND : BLOCK_STONE;
+        } else if (biome == BIOME_ROCKY) {
+          block = (y >= height - 1) ? BLOCK_COBBLE : BLOCK_STONE;
         } else if (y == height) {
-          block = BLOCK_GRASS;
+          block = surface;
         } else if (y >= height - 2) {
-          block = BLOCK_DIRT;
+          block = filler;
+        } else if (biome == BIOME_WETLAND && y >= height - 4) {
+          block = BLOCK_CLAY;
         }
         set_block(x, y, z, block);
       }
@@ -550,16 +762,28 @@ void reset_world() {
 
   for (int x = 2; x < app_config::WORLD_W - 2; ++x) {
     for (int z = 2; z < app_config::WORLD_D - 2; ++z) {
+      const BiomeType biome = biome_at(x, z);
       const int y = top_solid_y(x, z);
       const uint8_t top_block = get_block(x, y, z);
       if (top_block == BLOCK_GRASS) {
-        if ((hash_coords(x, z, g_seed ^ 0x2222U) & 0xFFU) < 4U) {
+        const uint8_t roll = static_cast<uint8_t>(hash_coords(x, z, g_seed ^ 0x2222U) & 0xFFU);
+        if ((biome == BIOME_FOREST && roll < 18U) ||
+            (biome == BIOME_PLAINS && roll < 6U) ||
+            (biome == BIOME_WETLAND && roll < 4U)) {
           place_tree(x, y, z);
         }
-      } else if (top_block == BLOCK_SAND) {
+      } else if (top_block == BLOCK_SNOW) {
+        if ((hash_coords(x, z, g_seed ^ 0x3131U) & 0xFFU) < 14U) {
+          place_pine_tree(x, y, z);
+        }
+      } else if (top_block == BLOCK_SAND || top_block == BLOCK_RED_SAND) {
         const uint8_t roll = static_cast<uint8_t>(hash_coords(x, z, g_seed ^ 0x5555U) & 0x1FU);
         if (roll == 0U) {
           place_cactus(x, y, z, 2 + static_cast<int>(hash_coords(x, z, g_seed ^ 0x7777U) % 3U));
+        }
+      } else if (top_block == BLOCK_COBBLE && biome == BIOME_ROCKY) {
+        if ((hash_coords(x, z, g_seed ^ 0x8888U) & 0x3FU) == 0U) {
+          place_boulder(x, y, z);
         }
       }
     }
@@ -568,22 +792,37 @@ void reset_world() {
   int spawn_x = app_config::WORLD_W / 2;
   int spawn_z = app_config::WORLD_D / 2;
   int best_y = 0;
-  for (int radius = 0; radius < 8; ++radius) {
-    for (int dz = -radius; dz <= radius; ++dz) {
-      for (int dx = -radius; dx <= radius; ++dx) {
-        const int x = app_config::WORLD_W / 2 + dx;
-        const int z = app_config::WORLD_D / 2 + dz;
-        if (!in_world(x, 1, z)) {
-          continue;
-        }
-        const int y = top_solid_y(x, z);
-        const uint8_t top_block = get_block(x, y, z);
-        if (top_block != BLOCK_WATER && top_block != BLOCK_LEAVES && top_block != BLOCK_CACTUS) {
-          spawn_x = x;
-          spawn_z = z;
-          best_y = y;
-          radius = 99;
-          break;
+  bool found_spawn = false;
+  for (uint32_t attempt = 0; attempt < 96U; ++attempt) {
+    const uint32_t hx = hash_u32(g_seed ^ (0x9E3779B9U + attempt * 0x45D9F3BU));
+    const uint32_t hz = hash_u32((g_seed << 1) ^ (0x7F4A7C15U + attempt * 0x27D4EB2DU));
+    const int x = 2 + static_cast<int>(hx % static_cast<uint32_t>(app_config::WORLD_W - 4));
+    const int z = 2 + static_cast<int>(hz % static_cast<uint32_t>(app_config::WORLD_D - 4));
+    int y = 0;
+    if (try_get_spawn_y(x, z, y)) {
+      spawn_x = x;
+      spawn_z = z;
+      best_y = y;
+      found_spawn = true;
+      break;
+    }
+  }
+
+  if (!found_spawn) {
+    for (int radius = 0; radius < 16; ++radius) {
+      for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+          const int x = app_config::WORLD_W / 2 + dx;
+          const int z = app_config::WORLD_D / 2 + dz;
+          int y = 0;
+          if (try_get_spawn_y(x, z, y)) {
+            spawn_x = x;
+            spawn_z = z;
+            best_y = y;
+            radius = 99;
+            found_spawn = true;
+            break;
+          }
         }
       }
     }
@@ -593,7 +832,14 @@ void reset_world() {
   g_player.z = spawn_z + 0.5f;
   g_player.y = best_y + 1.01f;
   g_player.velocity_y = 0.0f;
-  g_player.yaw_deg = 35.0f;
+  const float center_x = app_config::WORLD_W * 0.5f;
+  const float center_z = app_config::WORLD_D * 0.5f;
+  const float to_center_x = center_x - g_player.x;
+  const float to_center_z = center_z - g_player.z;
+  g_player.yaw_deg =
+      (fabsf(to_center_x) > 0.001f || fabsf(to_center_z) > 0.001f)
+          ? atan2f(to_center_z, to_center_x) * RAD_TO_DEG
+          : 0.0f;
   g_player.pitch_deg = -8.0f;
   g_player.on_ground = true;
   g_target.hit = false;
