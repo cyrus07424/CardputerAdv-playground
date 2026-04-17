@@ -327,9 +327,10 @@ class GameWorld {
   void drawSline(M5Canvas& canvas, const Vec3& p0, const Vec3& p1, uint16_t color = TFT_WHITE);
   void drawBlined(M5Canvas& canvas, const Vec3& p0, const Vec3& p1);
   void drawBline(M5Canvas& canvas, const Vec3& p0, const Vec3& p1);
-  void drawMline(M5Canvas& canvas, const Vec3& p0, const Vec3& p1);
+  void drawMline(M5Canvas& canvas, const Vec3& p0, const Vec3& p1, uint16_t color);
   void drawAline(M5Canvas& canvas, const Vec3& p0, const Vec3& p1);
-  void drawPoly(M5Canvas& canvas, const Vec3& p0, const Vec3& p1, const Vec3& p2);
+  void drawPoly(M5Canvas& canvas, const Vec3& p0, const Vec3& p1, const Vec3& p2,
+                uint16_t color = TFT_WHITE);
   void fillBarc(M5Canvas& canvas, const Vec3& p);
 };
 
@@ -1539,9 +1540,16 @@ void GameWorld::drawBline(M5Canvas& canvas, const Vec3& p0, const Vec3& p1) {
   }
 }
 
-void GameWorld::drawMline(M5Canvas& canvas, const Vec3& p0, const Vec3& p1) {
+static uint16_t gray565(uint8_t level) {
+  const uint16_t r = static_cast<uint16_t>((static_cast<uint32_t>(level) * 31U + 127U) / 255U);
+  const uint16_t g = static_cast<uint16_t>((static_cast<uint32_t>(level) * 63U + 127U) / 255U);
+  const uint16_t b = static_cast<uint16_t>((static_cast<uint32_t>(level) * 31U + 127U) / 255U);
+  return static_cast<uint16_t>((r << 11) | (g << 5) | b);
+}
+
+void GameWorld::drawMline(M5Canvas& canvas, const Vec3& p0, const Vec3& p1, uint16_t color) {
   if (p0.x > -1000.0 && p1.x > -1000.0) {
-    drawSline(canvas, p0, p1, TFT_LIGHTGREY);
+    drawSline(canvas, p0, p1, color);
   }
 }
 
@@ -1554,10 +1562,11 @@ void GameWorld::drawAline(M5Canvas& canvas, const Vec3& p0, const Vec3& p1) {
   }
 }
 
-void GameWorld::drawPoly(M5Canvas& canvas, const Vec3& p0, const Vec3& p1, const Vec3& p2) {
-  drawSline(canvas, p0, p1);
-  drawSline(canvas, p1, p2);
-  drawSline(canvas, p2, p0);
+void GameWorld::drawPoly(
+    M5Canvas& canvas, const Vec3& p0, const Vec3& p1, const Vec3& p2, uint16_t color) {
+  drawSline(canvas, p0, p1, color);
+  drawSline(canvas, p1, p2, color);
+  drawSline(canvas, p2, p0, color);
 }
 
 void GameWorld::fillBarc(M5Canvas& canvas, const Vec3& p) {
@@ -1657,7 +1666,9 @@ void GameWorld::writeAam(M5Canvas& canvas, Plane& aplane) {
       change3d(plane[0], ap.opVel[k], dm);
       for (int m = 0; m < ap.count; ++m) {
         change3d(plane[0], ap.opVel[k], cp);
-        drawMline(canvas, dm, cp);
+        const float t = ap.count > 1 ? static_cast<float>(m) / static_cast<float>(ap.count - 1) : 0.0f;
+        const uint8_t gray = static_cast<uint8_t>(255.0f - t * 175.0f);
+        drawMline(canvas, dm, cp, gray565(gray));
         k = (k + Missile::MOMAX + 1) % Missile::MOMAX;
         dm.set(cp);
       }
@@ -1698,7 +1709,7 @@ void GameWorld::writePlane(M5Canvas& canvas) {
         change3d(plane[0], p0, s0);
         change3d(plane[0], p1, s1);
         change3d(plane[0], p2, s2);
-        drawPoly(canvas, s0, s1, s2);
+        drawPoly(canvas, s0, s1, s2, TFT_OLIVE);
       }
     }
   }
@@ -1953,8 +1964,8 @@ void draw_reticle(M5Canvas& canvas, const Plane& player, bool auto_flight) {
   canvas.drawFastHLine(cx - 6, cy, 12, TFT_DARKGREY);
   canvas.drawFastVLine(cx, cy - 6, 12, TFT_DARKGREY);
 
-  const int gun_x = cx + static_cast<int>(player.gunX * 0.18);
-  const int gun_y = cy - static_cast<int>((player.gunY - 20.0) * 0.18);
+  const int gun_x = cx + static_cast<int>(player.gunX * 0.36);
+  const int gun_y = cy - static_cast<int>((player.gunY - 20.0) * 0.36);
   const uint16_t reticle_color = auto_flight ? TFT_YELLOW : TFT_CYAN;
   canvas.drawCircle(gun_x, gun_y, app_config::RETICLE_RADIUS, reticle_color);
   canvas.drawFastHLine(gun_x - 14, gun_y, 28, reticle_color);
