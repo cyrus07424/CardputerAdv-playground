@@ -26,7 +26,9 @@ constexpr float GRAVITY = 15.0f;
 constexpr float JUMP_VELOCITY = 5.2f;
 constexpr float TURN_SPEED_DEG = 110.0f;
 constexpr float LOOK_SPEED_DEG = 90.0f;
-constexpr float H_FOV_DEG = 68.0f;
+constexpr float DEFAULT_H_FOV_DEG = 90.0f;
+constexpr float MIN_H_FOV_DEG = 70.0f;
+constexpr float MAX_H_FOV_DEG = 100.0f;
 constexpr float RAY_MAX_DISTANCE = 30.0f;
 constexpr float TARGET_MAX_DISTANCE = 6.5f;
 constexpr int MAX_RAY_STEPS = 72;
@@ -124,6 +126,11 @@ struct InputLatch {
   bool toggle_header = false;
   bool toggle_fly = false;
   bool reset_world = false;
+  bool toggle_menu = false;
+  bool menu_up = false;
+  bool menu_down = false;
+  bool menu_left = false;
+  bool menu_right = false;
 };
 
 M5Canvas g_canvas(&M5Cardputer.Display);
@@ -143,9 +150,14 @@ uint32_t g_last_draw_ms = 0;
 uint32_t g_frame_counter = 0;
 uint32_t g_last_fps_sample_ms = 0;
 uint16_t g_fps = 0;
+float g_h_fov_deg = app_config::DEFAULT_H_FOV_DEG;
+float g_horizontal_speed_multiplier = 1.0f;
 bool g_show_help = true;
 bool g_show_header = true;
 bool g_show_footer = true;
+bool g_night_mode = false;
+bool g_menu_visible = false;
+int g_menu_index = 0;
 InputLatch g_latched_input;
 
 bool g_prev_break = false;
@@ -157,6 +169,11 @@ bool g_prev_reset = false;
 bool g_prev_help_toggle = false;
 bool g_prev_header_toggle = false;
 bool g_prev_footer_toggle = false;
+bool g_prev_fn = false;
+bool g_prev_menu_up = false;
+bool g_prev_menu_down = false;
+bool g_prev_menu_left = false;
+bool g_prev_menu_right = false;
 
 constexpr uint8_t kSelectableBlocks[] = {
     BLOCK_GRASS,
@@ -581,11 +598,13 @@ BiomeType biome_at(int x, int z) {
   const float rugged = fbm_noise(x * 0.055f, z * 0.055f, g_seed ^ 0x3C4DU);
   const float mesa = value_noise(x * 0.062f, z * 0.062f, g_seed ^ 0x4D5EU);
 
-  if (temperature < 0.25f) {
+  if (temperature < 0.26f) {
     return BIOME_SNOW;
   }
-  if (temperature > 0.77f && moisture < 0.24f) {
-    return mesa > 0.52f ? BIOME_RED_DESERT : BIOME_DESERT;
+  if (temperature > 0.68f && moisture < 0.36f) {
+    return (mesa > 0.56f || (temperature > 0.76f && rugged < 0.46f))
+               ? BIOME_RED_DESERT
+               : BIOME_DESERT;
   }
   if (rugged > 0.70f && moisture < 0.62f) {
     return BIOME_ROCKY;
@@ -777,8 +796,8 @@ void reset_world() {
           place_pine_tree(x, y, z);
         }
       } else if (top_block == BLOCK_SAND || top_block == BLOCK_RED_SAND) {
-        const uint8_t roll = static_cast<uint8_t>(hash_coords(x, z, g_seed ^ 0x5555U) & 0x1FU);
-        if (roll == 0U) {
+        const uint8_t roll = static_cast<uint8_t>(hash_coords(x, z, g_seed ^ 0x5555U) % 20U);
+        if (roll <= 1U) {
           place_cactus(x, y, z, 2 + static_cast<int>(hash_coords(x, z, g_seed ^ 0x7777U) % 3U));
         }
       } else if (top_block == BLOCK_COBBLE && biome == BIOME_ROCKY) {
@@ -1099,6 +1118,15 @@ bool motion_input_active(const Keyboard_Class::KeysState& status) {
          key_pressed(status, 'g');
 }
 
+bool contains_hid_key(const Keyboard_Class::KeysState& status, uint8_t key_code) {
+  for (const auto key : status.hid_keys) {
+    if (key == key_code) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void latch_render_input(const Keyboard_Class::KeysState& status) {
   g_latched_input.move_forward |= key_pressed(status, 'w');
   g_latched_input.move_back |= key_pressed(status, 's');
@@ -1119,6 +1147,72 @@ void latch_render_input(const Keyboard_Class::KeysState& status) {
   g_latched_input.toggle_header |= key_pressed(status, 'u');
   g_latched_input.toggle_fly |= key_pressed(status, 'f');
   g_latched_input.reset_world |= key_pressed(status, 'r');
+  g_latched_input.toggle_menu |= status.fn;
+  g_latched_input.menu_up |= key_pressed(status, ';');
+  g_latched_input.menu_down |= key_pressed(status, '.');
+  g_latched_input.menu_left |= key_pressed(status, ',');
+  g_latched_input.menu_right |= key_pressed(status, '/');
+}
+
+void update_projection_factors() {
+  const float v_fov = g_h_fov_deg *
+                      (static_cast<float>(app_config::RENDER_H) / static_cast<float>(app_config::RENDER_W));
+  const float tan_half_h = tanf(g_h_fov_deg * DEG_TO_RAD * 0.5f);
+  const float tan_half_v = tanf(v_fov * DEG_TO_RAD * 0.5f);
+
+  for (int x = 0; x < app_config::RENDER_W; ++x) {
+    g_column_factor[x] =
+        (((static_cast<float>(x) + 0.5f) / app_config::RENDER_W) - 0.5f) * 2.0f * tan_half_h;
+  }
+  for (int y = 0; y < app_config::RENDER_H; ++y) {
+    g_row_factor[y] =
+        (0.5f - ((static_cast<float>(y) + 0.5f) / app_config::RENDER_H)) * 2.0f * tan_half_v;
+  }
+}
+
+void update_environment_palette() {
+  for (int row = 0; row < app_config::RENDER_H; ++row) {
+    const float t = static_cast<float>(row) / static_cast<float>(app_config::RENDER_H - 1);
+    if (g_night_mode) {
+      g_sky_colors[row] = lgfx::v1::color565(
+          static_cast<uint8_t>(4 + 10 * (1.0f - t)),
+          static_cast<uint8_t>(10 + 18 * (1.0f - t)),
+          static_cast<uint8_t>(22 + 42 * (1.0f - t)));
+      g_ground_colors[row] = lgfx::v1::color565(
+          static_cast<uint8_t>(8 + 8 * t),
+          static_cast<uint8_t>(12 + 10 * t),
+          static_cast<uint8_t>(10 + 10 * t));
+    } else {
+      g_sky_colors[row] = lgfx::v1::color565(
+          static_cast<uint8_t>(18 + 34 * (1.0f - t)),
+          static_cast<uint8_t>(80 + 80 * (1.0f - t)),
+          static_cast<uint8_t>(120 + 90 * (1.0f - t)));
+      g_ground_colors[row] = lgfx::v1::color565(
+          static_cast<uint8_t>(24 + 22 * t),
+          static_cast<uint8_t>(38 + 26 * t),
+          static_cast<uint8_t>(20 + 18 * t));
+    }
+  }
+}
+
+void adjust_fov(float delta_deg) {
+  const float next_fov = clampf(g_h_fov_deg + delta_deg, app_config::MIN_H_FOV_DEG, app_config::MAX_H_FOV_DEG);
+  if (fabsf(next_fov - g_h_fov_deg) < 0.01f) {
+    return;
+  }
+  g_h_fov_deg = next_fov;
+  update_projection_factors();
+  request_low_res_redraw();
+}
+
+void adjust_horizontal_speed(float delta_multiplier) {
+  const float next_multiplier =
+      clampf(g_horizontal_speed_multiplier + delta_multiplier, 0.5f, 5.0f);
+  if (fabsf(next_multiplier - g_horizontal_speed_multiplier) < 0.01f) {
+    return;
+  }
+  g_horizontal_speed_multiplier = next_multiplier;
+  request_low_res_redraw();
 }
 
 void update_target_ray() {
@@ -1182,6 +1276,58 @@ void update_game(float dt) {
   const bool header_key = key_pressed(status, 'u') || latched.toggle_header;
   const bool fly_toggle = key_pressed(status, 'f') || latched.toggle_fly;
   const bool reset_key = key_pressed(status, 'r') || latched.reset_world;
+  const bool toggle_menu = status.fn || latched.toggle_menu;
+  const bool menu_up = key_pressed(status, ';') || latched.menu_up;
+  const bool menu_down = key_pressed(status, '.') || latched.menu_down;
+  const bool menu_left = key_pressed(status, ',') || latched.menu_left;
+  const bool menu_right = key_pressed(status, '/') || latched.menu_right;
+
+  if (toggle_menu && !g_prev_fn) {
+    g_menu_visible = !g_menu_visible;
+    request_low_res_redraw();
+  }
+  g_prev_fn = toggle_menu;
+
+  if (g_menu_visible) {
+    if (menu_up && !g_prev_menu_up) {
+      g_menu_index = (g_menu_index + 3 - 1) % 3;
+    }
+    if (menu_down && !g_prev_menu_down) {
+      g_menu_index = (g_menu_index + 1) % 3;
+    }
+    if (menu_left && !g_prev_menu_left) {
+      if (g_menu_index == 0) {
+        adjust_fov(-2.0f);
+      } else if (g_menu_index == 1) {
+        adjust_horizontal_speed(-0.5f);
+      } else {
+        g_night_mode = !g_night_mode;
+        update_environment_palette();
+        request_low_res_redraw();
+      }
+    }
+    if (menu_right && !g_prev_menu_right) {
+      if (g_menu_index == 0) {
+        adjust_fov(2.0f);
+      } else if (g_menu_index == 1) {
+        adjust_horizontal_speed(0.5f);
+      } else {
+        g_night_mode = !g_night_mode;
+        update_environment_palette();
+        request_low_res_redraw();
+      }
+    }
+    g_prev_menu_up = menu_up;
+    g_prev_menu_down = menu_down;
+    g_prev_menu_left = menu_left;
+    g_prev_menu_right = menu_right;
+    return;
+  }
+
+  g_prev_menu_up = false;
+  g_prev_menu_down = false;
+  g_prev_menu_left = false;
+  g_prev_menu_right = false;
 
   g_player.yaw_deg +=
       ((turn_right ? 1.0f : 0.0f) - (turn_left ? 1.0f : 0.0f)) * app_config::TURN_SPEED_DEG * dt;
@@ -1247,7 +1393,9 @@ void update_game(float dt) {
   }
   move_dir = normalize_vec3(move_dir);
 
-  const float speed = g_player.fly_mode ? app_config::FLY_SPEED : app_config::WALK_SPEED;
+  const float speed =
+      (g_player.fly_mode ? app_config::FLY_SPEED : app_config::WALK_SPEED) *
+      g_horizontal_speed_multiplier;
   try_move_horizontal(move_dir.x * speed * dt, move_dir.z * speed * dt);
 
   if (g_player.fly_mode) {
@@ -1345,6 +1493,9 @@ uint16_t voxel_color_for_hit(const RayHit& hit, const Vec3& origin, const Vec3& 
   light *= 1.0f - clampf(hit.distance / app_config::RAY_MAX_DISTANCE, 0.0f, 1.0f) * 0.36f;
   if (hit.block == BLOCK_WATER) {
     light *= 0.92f;
+  }
+  if (g_night_mode) {
+    light *= 0.58f;
   }
 
   return output_color_565(shade_rgb(texel, light));
@@ -1477,9 +1628,69 @@ void draw_hud() {
   g_canvas.setCursor(18, 52);
   g_canvas.print("Z break  X place  C block");
   g_canvas.setCursor(18, 64);
-  g_canvas.print("R regen  H help");
+  g_canvas.print("R regen  H help  Fn menu");
   g_canvas.setCursor(18, 76);
   g_canvas.print("U header  B footer");
+}
+
+void draw_popup_menu() {
+  if (!g_menu_visible) {
+    return;
+  }
+
+  const int16_t x = 4;
+  const int16_t y = 10;
+  const int16_t w = 128;
+  const int16_t h = 74;
+  g_canvas.fillRoundRect(x, y, w, h, 4, TFT_BLACK);
+  g_canvas.drawRoundRect(x, y, w, h, 4, TFT_DARKGREY);
+  g_canvas.drawRoundRect(x + 1, y + 1, w - 2, h - 2, 4, TFT_ORANGE);
+  g_canvas.setTextFont(1);
+  g_canvas.setTextSize(1);
+  g_canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
+  g_canvas.setCursor(x + 6, y + 4);
+  g_canvas.print("SETTINGS");
+
+  const int16_t row0_y = y + 18;
+  const int16_t row1_y = y + 28;
+  const int16_t row2_y = y + 38;
+  const bool row0_selected = g_menu_index == 0;
+  const bool row1_selected = g_menu_index == 1;
+  const bool row2_selected = g_menu_index == 2;
+
+  if (row0_selected) {
+    g_canvas.fillRect(x + 3, row0_y - 1, w - 8, 9, TFT_ORANGE);
+  }
+  if (row1_selected) {
+    g_canvas.fillRect(x + 3, row1_y - 1, w - 8, 9, TFT_ORANGE);
+  }
+  if (row2_selected) {
+    g_canvas.fillRect(x + 3, row2_y - 1, w - 8, 9, TFT_ORANGE);
+  }
+
+  g_canvas.setTextColor(row0_selected ? TFT_BLACK : TFT_WHITE, row0_selected ? TFT_ORANGE : TFT_BLACK);
+  g_canvas.setCursor(x + 6, row0_y);
+  g_canvas.print("FOV");
+  g_canvas.setCursor(x + 74, row0_y);
+  g_canvas.printf("%3d deg", static_cast<int>(g_h_fov_deg + 0.5f));
+
+  g_canvas.setTextColor(row1_selected ? TFT_BLACK : TFT_WHITE, row1_selected ? TFT_ORANGE : TFT_BLACK);
+  g_canvas.setCursor(x + 6, row1_y);
+  g_canvas.print("SPD");
+  g_canvas.setCursor(x + 74, row1_y);
+  g_canvas.printf("%3.1fx", g_horizontal_speed_multiplier);
+
+  g_canvas.setTextColor(row2_selected ? TFT_BLACK : TFT_WHITE, row2_selected ? TFT_ORANGE : TFT_BLACK);
+  g_canvas.setCursor(x + 6, row2_y);
+  g_canvas.print("TIME");
+  g_canvas.setCursor(x + 74, row2_y);
+  g_canvas.print(g_night_mode ? "NIGHT" : "DAY");
+
+  g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+  g_canvas.setCursor(x + 6, y + 54);
+  g_canvas.print("Cursor ;.,/ select");
+  g_canvas.setCursor(x + 6, y + 62);
+  g_canvas.print("Fn close  ,/ change");
 }
 
 bool draw_frame() {
@@ -1487,6 +1698,7 @@ bool draw_frame() {
     return false;
   }
   draw_hud();
+  draw_popup_menu();
   M5Cardputer.Display.startWrite();
   g_canvas.pushSprite(&M5Cardputer.Display, 0, 0);
   M5Cardputer.Display.endWrite();
@@ -1495,32 +1707,8 @@ bool draw_frame() {
 
 void setup_palette() {
   build_block_textures();
-
-  for (int row = 0; row < app_config::RENDER_H; ++row) {
-    const float t = static_cast<float>(row) / static_cast<float>(app_config::RENDER_H - 1);
-    g_sky_colors[row] = lgfx::v1::color565(
-        static_cast<uint8_t>(18 + 34 * (1.0f - t)),
-        static_cast<uint8_t>(80 + 80 * (1.0f - t)),
-        static_cast<uint8_t>(120 + 90 * (1.0f - t)));
-    g_ground_colors[row] = lgfx::v1::color565(
-        static_cast<uint8_t>(24 + 22 * t),
-        static_cast<uint8_t>(38 + 26 * t),
-        static_cast<uint8_t>(20 + 18 * t));
-  }
-
-  const float v_fov = app_config::H_FOV_DEG *
-                      (static_cast<float>(app_config::RENDER_H) / static_cast<float>(app_config::RENDER_W));
-  const float tan_half_h = tanf(app_config::H_FOV_DEG * DEG_TO_RAD * 0.5f);
-  const float tan_half_v = tanf(v_fov * DEG_TO_RAD * 0.5f);
-
-  for (int x = 0; x < app_config::RENDER_W; ++x) {
-    g_column_factor[x] =
-        (((static_cast<float>(x) + 0.5f) / app_config::RENDER_W) - 0.5f) * 2.0f * tan_half_h;
-  }
-  for (int y = 0; y < app_config::RENDER_H; ++y) {
-    g_row_factor[y] =
-        (0.5f - ((static_cast<float>(y) + 0.5f) / app_config::RENDER_H)) * 2.0f * tan_half_v;
-  }
+  update_environment_palette();
+  update_projection_factors();
 }
 
 void setup() {
