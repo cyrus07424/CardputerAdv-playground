@@ -302,6 +302,7 @@ class GameWorld {
   bool auto_flight;
   bool started;
   bool paused;
+  bool chrome_visible;
   int screen_width;
   int screen_height;
   int center_x;
@@ -337,6 +338,8 @@ GameWorld g_world;
 bool g_needs_redraw = true;
 uint32_t g_last_frame_ms = 0;
 bool g_prev_enter = false;
+bool g_prev_reset = false;
+bool g_prev_esc = false;
 
 double rand_unit() {
   return static_cast<double>(random(0, 1000000L)) / 1000000.0;
@@ -436,6 +439,7 @@ GameWorld::GameWorld()
       auto_flight(true),
       started(false),
       paused(false),
+      chrome_visible(true),
       screen_width(app_config::SCREEN_W),
       screen_height(app_config::SCREEN_H),
       center_x(app_config::SCREEN_W / 2),
@@ -1117,6 +1121,9 @@ void Plane::moveBullet(GameWorld& world) {
     }
     gunVx += xx;
     gunVy -= yy;
+  } else {
+    gunVx += (-gunX) * 0.08;
+    gunVy += (20.0 - gunY) * 0.08;
   }
   gunX += gunVx * 100.0 / 300.0;
   gunY += gunVy * 100.0 / 300.0;
@@ -1407,6 +1414,7 @@ void GameWorld::init() {
   objInit();
 
   for (int i = 0; i < app_config::PMAX; ++i) {
+    plane[i].posInit();
     plane[i].no = i;
   }
 
@@ -1423,6 +1431,10 @@ void GameWorld::init() {
   plane[2].level = 20;
   plane[3].level = 30;
 
+  control = ControlState{};
+  camerapos.set(plane[0].pVel);
+  frame_counter = 0;
+  chrome_visible = true;
   auto_flight = true;
   started = true;
   paused = false;
@@ -1884,16 +1896,64 @@ void draw_attitude_hud(M5Canvas& canvas, const Plane& player) {
   draw_pitch_ladder(canvas, cx, cy, pitch_deg, roll_deg);
 }
 
+void draw_enemy_direction_arrows(M5Canvas& canvas, const GameWorld& world) {
+  const Plane& player = world.plane[0];
+  const int16_t cx = app_config::SCREEN_W / 2;
+  const int16_t cy = 70;
+  const float radius = 44.0f;
+
+  for (int i = 1; i < app_config::PMAX; ++i) {
+    if (!world.plane[i].use) {
+      continue;
+    }
+
+    Vec3 rel;
+    Vec3 local;
+    rel.setMinus(world.plane[i].pVel, player.pVel);
+    player.change_w2l(rel, local);
+
+    float dir_x = static_cast<float>(local.x);
+    float dir_y = static_cast<float>(-local.z);
+    if (local.y < 0.0) {
+      dir_x = -dir_x;
+      dir_y = -dir_y;
+    }
+
+    const float len = sqrtf(dir_x * dir_x + dir_y * dir_y);
+    if (len < 1.0f) {
+      continue;
+    }
+
+    dir_x /= len;
+    dir_y /= len;
+
+    const int16_t tip_x = static_cast<int16_t>(cx + dir_x * radius);
+    const int16_t tip_y = static_cast<int16_t>(cy + dir_y * radius);
+    const int16_t base_x = static_cast<int16_t>(cx + dir_x * (radius - 8.0f));
+    const int16_t base_y = static_cast<int16_t>(cy + dir_y * (radius - 8.0f));
+    const int16_t left_x = static_cast<int16_t>(base_x - dir_y * 4.0f);
+    const int16_t left_y = static_cast<int16_t>(base_y + dir_x * 4.0f);
+    const int16_t right_x = static_cast<int16_t>(base_x + dir_y * 4.0f);
+    const int16_t right_y = static_cast<int16_t>(base_y - dir_x * 4.0f);
+
+    canvas.fillTriangle(tip_x, tip_y, left_x, left_y, right_x, right_y, TFT_ORANGE);
+  }
+}
+
 void draw_reticle(M5Canvas& canvas, const Plane& player, bool auto_flight) {
   const int cx = app_config::SCREEN_W / 2;
   const int cy = 70;
-  canvas.drawCircle(cx, cy, app_config::RETICLE_RADIUS, TFT_DARKGREY);
-  canvas.drawFastHLine(cx - 14, cy, 28, TFT_DARKGREY);
-  canvas.drawFastVLine(cx, cy - 14, 28, TFT_DARKGREY);
+  canvas.drawCircle(cx, cy, 3, TFT_DARKGREY);
+  canvas.drawFastHLine(cx - 6, cy, 12, TFT_DARKGREY);
+  canvas.drawFastVLine(cx, cy - 6, 12, TFT_DARKGREY);
 
   const int gun_x = cx + static_cast<int>(player.gunX * 0.18);
   const int gun_y = cy - static_cast<int>((player.gunY - 20.0) * 0.18);
-  canvas.drawCircle(gun_x, gun_y, 4, auto_flight ? TFT_YELLOW : TFT_CYAN);
+  const uint16_t reticle_color = auto_flight ? TFT_YELLOW : TFT_CYAN;
+  canvas.drawCircle(gun_x, gun_y, app_config::RETICLE_RADIUS, reticle_color);
+  canvas.drawFastHLine(gun_x - 14, gun_y, 28, reticle_color);
+  canvas.drawFastVLine(gun_x, gun_y - 14, 28, reticle_color);
+  canvas.drawCircle(gun_x, gun_y, 2, reticle_color);
 
   if (player.targetSx > -1000) {
     canvas.drawRect(player.targetSx - 6, player.targetSy - 6, 12, 12, TFT_RED);
@@ -1904,12 +1964,14 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
   const Plane& player = world.plane[0];
   canvas.setTextFont(1);
   canvas.setTextSize(1);
-  draw_mode_banner(canvas, world.auto_flight);
+  if (world.chrome_visible) {
+    draw_mode_banner(canvas, world.auto_flight);
 
-  canvas.setTextColor(TFT_GREEN, TFT_BLACK);
-  canvas.setCursor(0, 0);
-  canvas.print("NekoFlight ADV");
-  draw_battery_status(canvas, canvas.width());
+    canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+    canvas.setCursor(0, 0);
+    canvas.print("NekoFlight ADV");
+    draw_battery_status(canvas, canvas.width());
+  }
 
   draw_hud_tape(
       canvas,
@@ -1934,13 +1996,25 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
       "ALT",
       TFT_GREENYELLOW);
 
-  canvas.setTextColor(TFT_WHITE, TFT_BLACK);
-  canvas.setCursor(168, 10);
-  canvas.printf("TGT:%4d", static_cast<int>(player.targetDis));
+  if (world.chrome_visible && player.targetDis > 0.0) {
+    const int16_t panel_x = canvas.width() - 60;
+    const int16_t panel_y = 22;
+    const int16_t panel_w = 36;
+    const int16_t panel_h = 21;
+    draw_hud_panel(canvas, panel_x, panel_y, panel_w, panel_h, TFT_ORANGE);
+    canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
+    canvas.setCursor(panel_x + 4, panel_y + 3);
+    canvas.print("TGT");
+    canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
+    canvas.setCursor(panel_x + 4, panel_y + 11);
+    canvas.printf("%4d", static_cast<int>(player.targetDis));
+  }
 
-  canvas.setTextColor(player.gunTemp > Plane::MAXT * 3 / 4 ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
-  canvas.setCursor(0, app_config::FOOTER_Y);
-  canvas.printf("A:Fire S:Boost Ent:Auto / Gun:%02d", player.gunTemp);
+  if (world.chrome_visible) {
+    canvas.setTextColor(player.gunTemp > Plane::MAXT * 3 / 4 ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
+    canvas.setCursor(0, app_config::FOOTER_Y);
+    canvas.printf("A:Fire S:Boost R:Reset Ent:Auto / Gun:%02d", player.gunTemp);
+  }
 }
 
 void GameWorld::draw(M5Canvas& canvas) {
@@ -1949,6 +2023,7 @@ void GameWorld::draw(M5Canvas& canvas) {
   writeGround(canvas);
   writePlane(canvas);
   draw_attitude_hud(canvas, plane[0]);
+  draw_enemy_direction_arrows(canvas, *this);
   draw_reticle(canvas, plane[0], auto_flight);
   draw_hud(canvas, *this);
 }
@@ -1963,6 +2038,8 @@ void update_controls() {
   const bool rudder_right = contains_char_key(status, '\'') || contains_char_key(status, '"');
   const bool shoot = contains_char_key(status, 'a') || contains_char_key(status, 'A');
   const bool boost = contains_char_key(status, 's') || contains_char_key(status, 'S');
+  const bool reset = contains_char_key(status, 'r') || contains_char_key(status, 'R');
+  const bool toggle_chrome = contains_char_key(status, '`') || contains_char_key(status, '~');
   const bool toggle_auto = status.enter;
 
   g_world.control.up = up;
@@ -1973,6 +2050,18 @@ void update_controls() {
   g_world.control.rudder_right = rudder_right;
   g_world.control.shoot = shoot;
   g_world.control.boost = boost;
+
+  if (reset && !g_prev_reset) {
+    g_world.init();
+    g_needs_redraw = true;
+  }
+  g_prev_reset = reset;
+
+  if (toggle_chrome && !g_prev_esc) {
+    g_world.chrome_visible = !g_world.chrome_visible;
+    g_needs_redraw = true;
+  }
+  g_prev_esc = toggle_chrome;
 
   if (toggle_auto && !g_prev_enter) {
     g_world.auto_flight = !g_world.auto_flight;
