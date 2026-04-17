@@ -1770,7 +1770,63 @@ void draw_mode_banner(M5Canvas& canvas, bool auto_flight) {
   draw_hud_panel(canvas, banner_x, banner_y, banner_w, banner_h, mode_color);
   canvas.setTextColor(mode_color, TFT_BLACK);
   canvas.setCursor(banner_x + 8, banner_y + 3);
-  canvas.print(auto_flight ? "AUTO FLIGHT" : "MANUAL");
+  canvas.print(auto_flight ? "AUTO" : "MANUAL");
+}
+
+void draw_hud_tape(
+    M5Canvas& canvas,
+    int16_t center_x,
+    int16_t center_y,
+    int value,
+    int step,
+    int major_step,
+    int range,
+    bool left_side,
+    const char* label,
+    uint16_t color) {
+  const int16_t tape_h = 58;
+  const int16_t top_y = center_y - tape_h / 2;
+  const int16_t box_w = 28;
+  const int16_t box_h = 12;
+  const int16_t box_x = left_side ? center_x - 34 : center_x + 6;
+  const int16_t tick_outer_x = left_side ? box_x + box_w + 7 : box_x - 8;
+  const int16_t tick_inner_x = left_side ? tick_outer_x - 8 : tick_outer_x + 8;
+
+  canvas.setTextColor(color, TFT_BLACK);
+  canvas.setCursor(box_x + 2, top_y - 8);
+  canvas.print(label);
+
+  canvas.drawRect(box_x, center_y - box_h / 2, box_w, box_h, color);
+  canvas.setCursor(box_x + 3, center_y - 3);
+  canvas.printf("%3d", value);
+
+  const float pixels_per_step = 8.0f;
+  const int first_tick = static_cast<int>(floor(static_cast<float>(value - range) / step)) * step;
+  const int last_tick = static_cast<int>(ceil(static_cast<float>(value + range) / step)) * step;
+
+  for (int tick_value = first_tick; tick_value <= last_tick; tick_value += step) {
+    const float offset_steps = static_cast<float>(tick_value - value) / step;
+    const int16_t y = center_y + static_cast<int16_t>(offset_steps * pixels_per_step);
+    if (y < top_y || y > top_y + tape_h) {
+      continue;
+    }
+
+    const bool major = (tick_value % major_step) == 0;
+    const int16_t tick_len = major ? 10 : 4;
+    const int16_t x0 = left_side ? tick_outer_x : tick_outer_x;
+    const int16_t x1 = left_side ? tick_outer_x - tick_len : tick_outer_x + tick_len;
+    canvas.drawLine(x0, y, x1, y, color);
+  }
+
+  if (left_side) {
+    canvas.drawLine(box_x + box_w, center_y, tick_inner_x, center_y, color);
+    canvas.drawLine(tick_inner_x, center_y, tick_inner_x, center_y - 10, color);
+    canvas.drawLine(tick_inner_x, center_y, tick_inner_x, center_y + 10, color);
+  } else {
+    canvas.drawLine(box_x, center_y, tick_inner_x, center_y, color);
+    canvas.drawLine(tick_inner_x, center_y, tick_inner_x, center_y - 10, color);
+    canvas.drawLine(tick_inner_x, center_y, tick_inner_x, center_y + 10, color);
+  }
 }
 
 void rotate_around_origin(float x, float y, float angle_rad, int16_t& out_x, int16_t& out_y) {
@@ -1780,47 +1836,11 @@ void rotate_around_origin(float x, float y, float angle_rad, int16_t& out_x, int
   out_y = static_cast<int16_t>(x * sin_a + y * cos_a);
 }
 
-void draw_roll_scale(M5Canvas& canvas, int16_t cx, int16_t cy, float roll_deg) {
-  const int16_t scale_cy = cy - 20;
-  const int16_t radius_outer = 28;
-  const int16_t radius_inner_major = 22;
-  const int16_t radius_inner_minor = 24;
-  const int tick_angles[] = {-60, -45, -30, -15, 0, 15, 30, 45, 60};
-
-  for (size_t i = 0; i < sizeof(tick_angles) / sizeof(tick_angles[0]); ++i) {
-    const float tick_rad = tick_angles[i] * DEG_TO_RAD;
-    const float sin_t = sinf(tick_rad);
-    const float cos_t = cosf(tick_rad);
-    const int16_t outer_x = static_cast<int16_t>(cx + sin_t * radius_outer);
-    const int16_t outer_y = static_cast<int16_t>(scale_cy - cos_t * radius_outer);
-    const int16_t inner_radius = (tick_angles[i] % 30 == 0) ? radius_inner_major : radius_inner_minor;
-    const int16_t inner_x = static_cast<int16_t>(cx + sin_t * inner_radius);
-    const int16_t inner_y = static_cast<int16_t>(scale_cy - cos_t * inner_radius);
-    canvas.drawLine(inner_x, inner_y, outer_x, outer_y, TFT_DARKGREY);
-  }
-
-  canvas.drawTriangle(cx, scale_cy - radius_outer - 3, cx - 3, scale_cy - radius_outer + 3, cx + 3,
-                      scale_cy - radius_outer + 3, TFT_WHITE);
-  canvas.fillTriangle(cx, scale_cy - radius_outer - 3, cx - 3, scale_cy - radius_outer + 3, cx + 3,
-                      scale_cy - radius_outer + 3, TFT_WHITE);
-
-  if (roll_deg < -60.0f) {
-    roll_deg = -60.0f;
-  } else if (roll_deg > 60.0f) {
-    roll_deg = 60.0f;
-  }
-
-  const float pointer_rad = roll_deg * DEG_TO_RAD;
-  const int16_t pointer_x = static_cast<int16_t>(cx + sinf(pointer_rad) * radius_outer);
-  const int16_t pointer_y = static_cast<int16_t>(scale_cy - cosf(pointer_rad) * radius_outer);
-  canvas.drawLine(cx, scale_cy, pointer_x, pointer_y, TFT_YELLOW);
-}
-
 void draw_pitch_ladder(M5Canvas& canvas, int16_t cx, int16_t cy, float pitch_deg, float roll_deg) {
   const float roll_rad = roll_deg * DEG_TO_RAD;
   constexpr float pixels_per_deg = 1.5f;
 
-  for (int mark = -40; mark <= 40; mark += 10) {
+  for (int mark = -90; mark <= 90; mark += 10) {
     const float y_offset = (pitch_deg - static_cast<float>(mark)) * pixels_per_deg;
     if (fabsf(y_offset) > 30.0f) {
       continue;
@@ -1848,9 +1868,9 @@ void draw_pitch_ladder(M5Canvas& canvas, int16_t cx, int16_t cy, float pitch_deg
       int16_t tx;
       int16_t ty;
       rotate_around_origin(-half_width - 10, y_offset - 3, roll_rad, tx, ty);
-      canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+      canvas.setTextColor(TFT_DARKGREY, TFT_BLACK);
       canvas.setCursor(cx + tx, cy + ty);
-      canvas.printf("%d", abs(mark));
+      canvas.printf("%d", -mark);
     }
   }
 }
@@ -1861,7 +1881,6 @@ void draw_attitude_hud(M5Canvas& canvas, const Plane& player) {
   const float pitch_deg = static_cast<float>(player.aVel.x * RAD_TO_DEG);
   const float roll_deg = static_cast<float>(player.aVel.y * RAD_TO_DEG);
 
-  draw_roll_scale(canvas, cx, cy, roll_deg);
   draw_pitch_ladder(canvas, cx, cy, pitch_deg, roll_deg);
 }
 
@@ -1889,28 +1908,30 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
 
   canvas.setTextColor(TFT_GREEN, TFT_BLACK);
   canvas.setCursor(0, 0);
-  canvas.print("nekoFlight ADV");
+  canvas.print("NekoFlight ADV");
   draw_battery_status(canvas, canvas.width());
 
-  draw_vertical_meter(
+  draw_hud_tape(
       canvas,
-      4,
-      20,
-      44,
-      72,
-      "SPD",
+      canvas.width() / 2 - 26,
+      70,
       static_cast<int>(player.vpVel.abs()),
-      400,
+      10,
+      50,
+      40,
+      true,
+      "SPD",
       TFT_CYAN);
-  draw_vertical_meter(
+  draw_hud_tape(
       canvas,
-      canvas.width() - 48,
-      20,
-      44,
-      72,
-      "ALT",
+      canvas.width() / 2 + 26,
+      70,
       static_cast<int>(player.height),
-      6000,
+      100,
+      500,
+      400,
+      false,
+      "ALT",
       TFT_GREENYELLOW);
 
   canvas.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -1919,7 +1940,7 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
 
   canvas.setTextColor(player.gunTemp > Plane::MAXT * 3 / 4 ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
   canvas.setCursor(0, app_config::FOOTER_Y);
-  canvas.printf("A:F S:B L/\":RUD Ent:A G%02d", player.gunTemp);
+  canvas.printf("A:Fire S:Boost Ent:Auto / Gun:%02d", player.gunTemp);
 }
 
 void GameWorld::draw(M5Canvas& canvas) {
@@ -1979,7 +2000,7 @@ void setup() {
 
   g_world.init();
   g_last_frame_ms = millis();
-  Serial.println("Cardputer ADV nekoFlight started");
+  Serial.println("Cardputer ADV NekoFlight started");
 }
 
 void loop() {
