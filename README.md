@@ -9,6 +9,7 @@ Cardputer-ADV 向けの小さな Arduino デモ集です。Arduino IDE で開い
 | `CardputerAdvLoraChatDemo` | Cap LoRa-1262 を使ったシンプルな LoRa メッセージ送受信 | `M5Cardputer`, `RadioLib` |
 | `CardputerAdvKeyboardInputDemo` | Cardputer-ADV 本体キーボードでの文字入力表示 | `M5Cardputer` |
 | `CardputerAdvGpsInfoDemo` | Cap LoRa-1262 内蔵 GNSS の受信情報表示 | `M5Cardputer`, `TinyGPSPlus` |
+| `CardputerAdvImu3dDemo` | 内蔵加速度 / ジャイロを使った 3D 姿勢ビジュアライズ | `M5Cardputer` |
 | `CardputerAdvDataHarvester` | Cap LoRa-1262 内蔵 GNSS と LoRa の受信情報収集・表示等 | `M5Cardputer`, `RadioLib`, `TinyGPSPlus` |
 
 ## 共通前提
