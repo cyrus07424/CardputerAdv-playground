@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include <M5Cardputer.h>
+#include <SD.h>
+#include <SPI.h>
+#include <esp_system.h>
 #include <math.h>
 #include "PescadoCore.h"
 
@@ -13,7 +16,7 @@ constexpr uint8_t TEXTURE_SIZE = 8;
 constexpr int WORLD_W = 64;
 constexpr int WORLD_H = 24;
 constexpr int WORLD_D = 64;
-constexpr int WATER_LEVEL = 6;
+constexpr int WATER_LEVEL = 4;
 
 constexpr uint32_t FRAME_INTERVAL_MS = 50;
 constexpr float MAX_DT_SEC = 0.05f;
@@ -29,11 +32,20 @@ constexpr float LOOK_SPEED_DEG = 90.0f;
 constexpr float DEFAULT_H_FOV_DEG = 90.0f;
 constexpr float MIN_H_FOV_DEG = 70.0f;
 constexpr float MAX_H_FOV_DEG = 100.0f;
+constexpr uint32_t SD_RETRY_MS = 3000U;
 constexpr float RAY_MAX_DISTANCE = 30.0f;
 constexpr float TARGET_MAX_DISTANCE = 6.5f;
 constexpr int MAX_RAY_STEPS = 72;
 constexpr uint32_t INITIAL_SEED = 1337U;
+constexpr char WORLD_SAVE_PATH[] = "/minecraft/world.bin";
 }  // namespace app_config
+
+namespace board_pins {
+constexpr int SD_SCK = 40;
+constexpr int SD_MISO = 39;
+constexpr int SD_MOSI = 14;
+constexpr int SD_CS = 12;
+}  // namespace board_pins
 
 enum BlockType : uint8_t {
   BLOCK_AIR = 0,
@@ -159,6 +171,9 @@ bool g_night_mode = false;
 bool g_menu_visible = false;
 int g_menu_index = 0;
 InputLatch g_latched_input;
+bool g_sd_ready = false;
+String g_menu_status = "SD init pending";
+uint32_t g_last_sd_check_ms = 0;
 
 bool g_prev_break = false;
 bool g_prev_place = false;
@@ -205,6 +220,11 @@ uint32_t g_last_frame_present_ms = 0;
 uint16_t g_last_frame_interval_ms = 0;
 uint8_t g_good_motion_frames = 0;
 uint8_t g_forced_low_res_frames = 0;
+
+uint32_t random_world_seed() {
+  const uint32_t seed = esp_random() ^ (static_cast<uint32_t>(micros()) << 11) ^ millis();
+  return seed != 0U ? seed : app_config::INITIAL_SEED;
+}
 
 float clampf(float value, float min_value, float max_value) {
   if (value < min_value) {
@@ -771,8 +791,9 @@ void reset_world() {
         set_block(x, y, z, block);
       }
 
-      if (height < app_config::WATER_LEVEL) {
-        for (int y = height + 1; y <= app_config::WATER_LEVEL; ++y) {
+      const int water_level = biome == BIOME_WETLAND ? app_config::WATER_LEVEL : app_config::WATER_LEVEL - 1;
+      if (height < water_level) {
+        for (int y = height + 1; y <= water_level; ++y) {
           set_block(x, y, z, BLOCK_WATER);
         }
       }
@@ -1215,6 +1236,158 @@ void adjust_horizontal_speed(float delta_multiplier) {
   request_low_res_redraw();
 }
 
+struct WorldSaveHeader {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t world_w;
+  uint16_t world_h;
+  uint16_t world_d;
+  uint32_t seed;
+  float player_x;
+  float player_y;
+  float player_z;
+  float player_yaw;
+  float player_pitch;
+  float fov_deg;
+  float horizontal_speed_multiplier;
+  uint8_t selected_slot;
+  uint8_t fly_mode;
+  uint8_t night_mode;
+  uint8_t reserved;
+};
+
+void init_spi_bus() {
+  SPI.begin(board_pins::SD_SCK, board_pins::SD_MISO, board_pins::SD_MOSI, board_pins::SD_CS);
+}
+
+bool init_sd_card() {
+  SD.end();
+  delay(5);
+  SPI.begin(board_pins::SD_SCK, board_pins::SD_MISO, board_pins::SD_MOSI, board_pins::SD_CS);
+  if (!SD.begin(board_pins::SD_CS, SPI, 25000000)) {
+    g_sd_ready = false;
+    g_menu_status = "SD init failed";
+    return false;
+  }
+  if (SD.cardType() == CARD_NONE) {
+    g_sd_ready = false;
+    g_menu_status = "No SD card";
+    return false;
+  }
+  g_sd_ready = true;
+  g_menu_status = "SD ready";
+  return true;
+}
+
+bool ensure_sd_card(bool force = false) {
+  if (g_sd_ready) {
+    return true;
+  }
+  const uint32_t now = millis();
+  if (!force && now - g_last_sd_check_ms < app_config::SD_RETRY_MS) {
+    return false;
+  }
+  g_last_sd_check_ms = now;
+  return init_sd_card();
+}
+
+bool save_world_to_sd() {
+  if (!ensure_sd_card(true)) {
+    return false;
+  }
+  if (!SD.exists("/minecraft") && !SD.mkdir("/minecraft")) {
+    g_menu_status = "mkdir failed";
+    return false;
+  }
+
+  SD.remove(app_config::WORLD_SAVE_PATH);
+  File file = SD.open(app_config::WORLD_SAVE_PATH, FILE_WRITE);
+  if (!file) {
+    g_menu_status = "open save failed";
+    return false;
+  }
+
+  const WorldSaveHeader header = {
+      0x4D434144U,
+      1,
+      app_config::WORLD_W,
+      app_config::WORLD_H,
+      app_config::WORLD_D,
+      g_seed,
+      g_player.x,
+      g_player.y,
+      g_player.z,
+      g_player.yaw_deg,
+      g_player.pitch_deg,
+      g_h_fov_deg,
+      g_horizontal_speed_multiplier,
+      g_player.selected_slot,
+      static_cast<uint8_t>(g_player.fly_mode ? 1 : 0),
+      static_cast<uint8_t>(g_night_mode ? 1 : 0),
+      0,
+  };
+
+  const bool ok =
+      file.write(reinterpret_cast<const uint8_t*>(&header), sizeof(header)) == sizeof(header) &&
+      file.write(reinterpret_cast<const uint8_t*>(g_world), sizeof(g_world)) == sizeof(g_world);
+  file.close();
+
+  g_menu_status = ok ? "World saved" : "Save failed";
+  return ok;
+}
+
+bool load_world_from_sd() {
+  if (!ensure_sd_card(true)) {
+    return false;
+  }
+
+  File file = SD.open(app_config::WORLD_SAVE_PATH, FILE_READ);
+  if (!file) {
+    g_menu_status = "No save file";
+    return false;
+  }
+
+  WorldSaveHeader header = {};
+  const bool header_ok =
+      file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) == sizeof(header);
+  const bool shape_ok =
+      header.magic == 0x4D434144U &&
+      header.version == 1 &&
+      header.world_w == app_config::WORLD_W &&
+      header.world_h == app_config::WORLD_H &&
+      header.world_d == app_config::WORLD_D;
+  const bool world_ok =
+      header_ok &&
+      shape_ok &&
+      file.read(reinterpret_cast<uint8_t*>(g_world), sizeof(g_world)) == sizeof(g_world);
+  file.close();
+
+  if (!world_ok) {
+    g_menu_status = "Load failed";
+    return false;
+  }
+
+  g_seed = header.seed;
+  g_player.x = clampf(header.player_x, 1.1f, app_config::WORLD_W - 1.1f);
+  g_player.y = clampf(header.player_y, 1.01f, app_config::WORLD_H - app_config::PLAYER_HEIGHT - 0.1f);
+  g_player.z = clampf(header.player_z, 1.1f, app_config::WORLD_D - 1.1f);
+  g_player.velocity_y = 0.0f;
+  g_player.yaw_deg = header.player_yaw;
+  g_player.pitch_deg = clampf(header.player_pitch, -60.0f, 60.0f);
+  g_player.selected_slot = min<int>(header.selected_slot, (sizeof(kSelectableBlocks) / sizeof(kSelectableBlocks[0])) - 1);
+  g_player.fly_mode = header.fly_mode != 0;
+  g_player.on_ground = false;
+  g_h_fov_deg = clampf(header.fov_deg, app_config::MIN_H_FOV_DEG, app_config::MAX_H_FOV_DEG);
+  g_horizontal_speed_multiplier = clampf(header.horizontal_speed_multiplier, 0.5f, 5.0f);
+  g_night_mode = header.night_mode != 0;
+  update_projection_factors();
+  update_environment_palette();
+  update_target_ray();
+  request_low_res_redraw();
+  g_menu_status = "World loaded";
+  return true;
+}
+
 void update_target_ray() {
   g_target = cast_ray(player_eye_position(), normalize_vec3(forward_vector()), app_config::TARGET_MAX_DISTANCE);
 }
@@ -1290,20 +1463,24 @@ void update_game(float dt) {
 
   if (g_menu_visible) {
     if (menu_up && !g_prev_menu_up) {
-      g_menu_index = (g_menu_index + 3 - 1) % 3;
+      g_menu_index = (g_menu_index + 5 - 1) % 5;
     }
     if (menu_down && !g_prev_menu_down) {
-      g_menu_index = (g_menu_index + 1) % 3;
+      g_menu_index = (g_menu_index + 1) % 5;
     }
     if (menu_left && !g_prev_menu_left) {
       if (g_menu_index == 0) {
         adjust_fov(-2.0f);
       } else if (g_menu_index == 1) {
         adjust_horizontal_speed(-0.5f);
-      } else {
+      } else if (g_menu_index == 2) {
         g_night_mode = !g_night_mode;
         update_environment_palette();
         request_low_res_redraw();
+      } else if (g_menu_index == 3) {
+        save_world_to_sd();
+      } else {
+        load_world_from_sd();
       }
     }
     if (menu_right && !g_prev_menu_right) {
@@ -1311,10 +1488,14 @@ void update_game(float dt) {
         adjust_fov(2.0f);
       } else if (g_menu_index == 1) {
         adjust_horizontal_speed(0.5f);
-      } else {
+      } else if (g_menu_index == 2) {
         g_night_mode = !g_night_mode;
         update_environment_palette();
         request_low_res_redraw();
+      } else if (g_menu_index == 3) {
+        save_world_to_sd();
+      } else {
+        load_world_from_sd();
       }
     }
     g_prev_menu_up = menu_up;
@@ -1641,7 +1822,7 @@ void draw_popup_menu() {
   const int16_t x = 4;
   const int16_t y = 10;
   const int16_t w = 128;
-  const int16_t h = 74;
+  const int16_t h = 96;
   g_canvas.fillRoundRect(x, y, w, h, 4, TFT_BLACK);
   g_canvas.drawRoundRect(x, y, w, h, 4, TFT_DARKGREY);
   g_canvas.drawRoundRect(x + 1, y + 1, w - 2, h - 2, 4, TFT_ORANGE);
@@ -1654,9 +1835,13 @@ void draw_popup_menu() {
   const int16_t row0_y = y + 18;
   const int16_t row1_y = y + 28;
   const int16_t row2_y = y + 38;
+  const int16_t row3_y = y + 48;
+  const int16_t row4_y = y + 58;
   const bool row0_selected = g_menu_index == 0;
   const bool row1_selected = g_menu_index == 1;
   const bool row2_selected = g_menu_index == 2;
+  const bool row3_selected = g_menu_index == 3;
+  const bool row4_selected = g_menu_index == 4;
 
   if (row0_selected) {
     g_canvas.fillRect(x + 3, row0_y - 1, w - 8, 9, TFT_ORANGE);
@@ -1666,6 +1851,12 @@ void draw_popup_menu() {
   }
   if (row2_selected) {
     g_canvas.fillRect(x + 3, row2_y - 1, w - 8, 9, TFT_ORANGE);
+  }
+  if (row3_selected) {
+    g_canvas.fillRect(x + 3, row3_y - 1, w - 8, 9, TFT_ORANGE);
+  }
+  if (row4_selected) {
+    g_canvas.fillRect(x + 3, row4_y - 1, w - 8, 9, TFT_ORANGE);
   }
 
   g_canvas.setTextColor(row0_selected ? TFT_BLACK : TFT_WHITE, row0_selected ? TFT_ORANGE : TFT_BLACK);
@@ -1686,11 +1877,25 @@ void draw_popup_menu() {
   g_canvas.setCursor(x + 74, row2_y);
   g_canvas.print(g_night_mode ? "NIGHT" : "DAY");
 
+  g_canvas.setTextColor(row3_selected ? TFT_BLACK : TFT_WHITE, row3_selected ? TFT_ORANGE : TFT_BLACK);
+  g_canvas.setCursor(x + 6, row3_y);
+  g_canvas.print("SAVE");
+  g_canvas.setCursor(x + 74, row3_y);
+  g_canvas.print("SD");
+
+  g_canvas.setTextColor(row4_selected ? TFT_BLACK : TFT_WHITE, row4_selected ? TFT_ORANGE : TFT_BLACK);
+  g_canvas.setCursor(x + 6, row4_y);
+  g_canvas.print("LOAD");
+  g_canvas.setCursor(x + 74, row4_y);
+  g_canvas.print("SD");
+
   g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
-  g_canvas.setCursor(x + 6, y + 54);
+  g_canvas.setCursor(x + 6, y + 70);
   g_canvas.print("Cursor ;.,/ select");
-  g_canvas.setCursor(x + 6, y + 62);
-  g_canvas.print("Fn close  ,/ change");
+  g_canvas.setCursor(x + 6, y + 78);
+  g_canvas.print("Fn close  ,/ action");
+  g_canvas.setCursor(x + 6, y + 86);
+  g_canvas.print(g_menu_status);
 }
 
 bool draw_frame() {
@@ -1727,7 +1932,10 @@ void setup() {
   g_canvas.setTextFont(1);
   g_canvas.setTextSize(1);
 
+  init_spi_bus();
+  ensure_sd_card(true);
   setup_palette();
+  g_seed = random_world_seed();
   reset_world();
   update_target_ray();
 
@@ -1741,6 +1949,7 @@ void setup() {
 
 void loop() {
   M5Cardputer.update();
+  ensure_sd_card();
 
   const uint32_t now = millis();
   float dt = static_cast<float>(now - g_last_tick_ms) / 1000.0f;
