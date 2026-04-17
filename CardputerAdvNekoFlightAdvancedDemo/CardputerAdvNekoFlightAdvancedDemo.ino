@@ -303,6 +303,19 @@ class GameWorld {
   bool started;
   bool paused;
   bool chrome_visible;
+  bool menu_visible;
+  bool ui_attitude_visible;
+  bool ui_reticle_visible;
+  bool ui_lock_box_visible;
+  bool ui_enemy_arrows_visible;
+  bool ui_speed_visible;
+  bool ui_altitude_visible;
+  bool ui_tgt_visible;
+  bool ui_header_visible;
+  bool ui_mode_banner_visible;
+  bool ui_footer_visible;
+  int menu_index;
+  int menu_scroll;
   int screen_width;
   int screen_height;
   int center_x;
@@ -341,6 +354,9 @@ uint32_t g_last_frame_ms = 0;
 bool g_prev_enter = false;
 bool g_prev_reset = false;
 bool g_prev_esc = false;
+bool g_prev_fn = false;
+bool g_prev_menu_up = false;
+bool g_prev_menu_down = false;
 
 double rand_unit() {
   return static_cast<double>(random(0, 1000000L)) / 1000000.0;
@@ -353,6 +369,41 @@ bool contains_hid_key(const Keyboard_Class::KeysState& status, uint8_t key_code)
     }
   }
   return false;
+}
+
+void reset_stage_preserve_ui(GameWorld& world) {
+  const bool chrome_visible = world.chrome_visible;
+  const bool menu_visible = world.menu_visible;
+  const bool ui_attitude_visible = world.ui_attitude_visible;
+  const bool ui_reticle_visible = world.ui_reticle_visible;
+  const bool ui_lock_box_visible = world.ui_lock_box_visible;
+  const bool ui_enemy_arrows_visible = world.ui_enemy_arrows_visible;
+  const bool ui_speed_visible = world.ui_speed_visible;
+  const bool ui_altitude_visible = world.ui_altitude_visible;
+  const bool ui_tgt_visible = world.ui_tgt_visible;
+  const bool ui_header_visible = world.ui_header_visible;
+  const bool ui_mode_banner_visible = world.ui_mode_banner_visible;
+  const bool ui_footer_visible = world.ui_footer_visible;
+  const int menu_index = world.menu_index;
+  const int menu_scroll = world.menu_scroll;
+
+  world.init();
+
+  world.chrome_visible = chrome_visible;
+  world.menu_visible = menu_visible;
+  world.ui_attitude_visible = ui_attitude_visible;
+  world.ui_reticle_visible = ui_reticle_visible;
+  world.ui_lock_box_visible = ui_lock_box_visible;
+  world.ui_enemy_arrows_visible = ui_enemy_arrows_visible;
+  world.ui_speed_visible = ui_speed_visible;
+  world.ui_altitude_visible = ui_altitude_visible;
+  world.ui_tgt_visible = ui_tgt_visible;
+  world.ui_header_visible = ui_header_visible;
+  world.ui_mode_banner_visible = ui_mode_banner_visible;
+  world.ui_footer_visible = ui_footer_visible;
+  world.menu_index = menu_index;
+  world.menu_scroll = menu_scroll;
+  g_needs_redraw = true;
 }
 
 bool contains_char_key(const Keyboard_Class::KeysState& status, char key_code) {
@@ -441,6 +492,19 @@ GameWorld::GameWorld()
       started(false),
       paused(false),
       chrome_visible(true),
+      menu_visible(false),
+      ui_attitude_visible(true),
+      ui_reticle_visible(true),
+      ui_lock_box_visible(true),
+      ui_enemy_arrows_visible(true),
+      ui_speed_visible(true),
+      ui_altitude_visible(true),
+      ui_tgt_visible(true),
+      ui_header_visible(true),
+      ui_mode_banner_visible(true),
+      ui_footer_visible(true),
+      menu_index(0),
+      menu_scroll(0),
       screen_width(app_config::SCREEN_W),
       screen_height(app_config::SCREEN_H),
       center_x(app_config::SCREEN_W / 2),
@@ -971,7 +1035,7 @@ void Plane::moveCalc(GameWorld& world) {
 
   if (height < 5.0 &&
       (fabs(vpVel.z) > 50.0 || fabs(aVel.y) > 20.0 * PI / 180.0 || aVel.x > 10.0 * PI / 180.0)) {
-    posInit();
+    reset_stage_preserve_ui(world);
   }
 }
 
@@ -1436,7 +1500,6 @@ void GameWorld::init() {
   camerapos.set(plane[0].pVel);
   frame_counter = 0;
   chrome_visible = true;
-  auto_flight = true;
   started = true;
   paused = false;
 }
@@ -1796,6 +1859,153 @@ void draw_mode_banner(M5Canvas& canvas, bool auto_flight) {
   canvas.print(auto_flight ? "AUTO" : "MANUAL");
 }
 
+constexpr int kUiMenuItemCount = 10;
+constexpr int kUiMenuVisibleRows = 9;
+
+const char* ui_menu_label(int index) {
+  switch (index) {
+    case 0:
+      return "Attitude HUD";
+    case 1:
+      return "Reticle";
+    case 2:
+      return "Lock Box";
+    case 3:
+      return "Enemy Arrows";
+    case 4:
+      return "Speed Tape";
+    case 5:
+      return "Altitude Tape";
+    case 6:
+      return "TGT Panel";
+    case 7:
+      return "Header";
+    case 8:
+      return "Mode Banner";
+    case 9:
+      return "Footer";
+    default:
+      return "";
+  }
+}
+
+bool ui_menu_value(const GameWorld& world, int index) {
+  switch (index) {
+    case 0:
+      return world.ui_attitude_visible;
+    case 1:
+      return world.ui_reticle_visible;
+    case 2:
+      return world.ui_lock_box_visible;
+    case 3:
+      return world.ui_enemy_arrows_visible;
+    case 4:
+      return world.ui_speed_visible;
+    case 5:
+      return world.ui_altitude_visible;
+    case 6:
+      return world.ui_tgt_visible;
+    case 7:
+      return world.ui_header_visible;
+    case 8:
+      return world.ui_mode_banner_visible;
+    case 9:
+      return world.ui_footer_visible;
+    default:
+      return false;
+  }
+}
+
+void toggle_ui_menu_value(GameWorld& world, int index) {
+  switch (index) {
+    case 0:
+      world.ui_attitude_visible = !world.ui_attitude_visible;
+      break;
+    case 1:
+      world.ui_reticle_visible = !world.ui_reticle_visible;
+      break;
+    case 2:
+      world.ui_lock_box_visible = !world.ui_lock_box_visible;
+      break;
+    case 3:
+      world.ui_enemy_arrows_visible = !world.ui_enemy_arrows_visible;
+      break;
+    case 4:
+      world.ui_speed_visible = !world.ui_speed_visible;
+      break;
+    case 5:
+      world.ui_altitude_visible = !world.ui_altitude_visible;
+      break;
+    case 6:
+      world.ui_tgt_visible = !world.ui_tgt_visible;
+      break;
+    case 7:
+      world.ui_header_visible = !world.ui_header_visible;
+      break;
+    case 8:
+      world.ui_mode_banner_visible = !world.ui_mode_banner_visible;
+      break;
+    case 9:
+      world.ui_footer_visible = !world.ui_footer_visible;
+      break;
+  }
+}
+
+void draw_popup_menu(M5Canvas& canvas, const GameWorld& world) {
+  if (!world.menu_visible) {
+    return;
+  }
+
+  const int16_t x = 4;
+  const int16_t y = 10;
+  const int16_t w = 126;
+  const int16_t h = 112;
+  canvas.fillRoundRect(x, y, w, h, 4, TFT_BLACK);
+  canvas.drawRoundRect(x, y, w, h, 4, TFT_DARKGREY);
+  canvas.drawRoundRect(x + 1, y + 1, w - 2, h - 2, 4, TFT_ORANGE);
+  canvas.setTextFont(1);
+  canvas.setTextSize(1);
+  canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
+  canvas.setCursor(x + 6, y + 4);
+  canvas.print("UI MENU");
+
+  const int visible_start = world.menu_scroll;
+  const int visible_end = min(kUiMenuItemCount, visible_start + kUiMenuVisibleRows);
+  for (int i = visible_start; i < visible_end; ++i) {
+    const int16_t row_y = y + 16 + (i - visible_start) * 10;
+    const bool selected = i == world.menu_index;
+    if (selected) {
+      canvas.fillRect(x + 3, row_y - 1, w - 14, 9, TFT_ORANGE);
+    }
+    canvas.setTextColor(selected ? TFT_BLACK : TFT_WHITE, TFT_BLACK);
+    canvas.setCursor(x + 6, row_y);
+    canvas.print(ui_menu_label(i));
+    canvas.setCursor(x + 96, row_y);
+    canvas.print(ui_menu_value(world, i) ? "ON" : "OFF");
+  }
+
+  if (kUiMenuItemCount > kUiMenuVisibleRows) {
+    const int16_t track_x = x + w - 8;
+    const int16_t track_y = y + 16;
+    const int16_t track_h = kUiMenuVisibleRows * 10 - 2;
+    canvas.drawRect(track_x, track_y, 4, track_h, TFT_DARKGREY);
+
+    const float ratio = static_cast<float>(kUiMenuVisibleRows) / static_cast<float>(kUiMenuItemCount);
+    int16_t thumb_h = static_cast<int16_t>(track_h * ratio);
+    if (thumb_h < 8) {
+      thumb_h = 8;
+    }
+    const int scroll_range = kUiMenuItemCount - kUiMenuVisibleRows;
+    int thumb_range = track_h - thumb_h - 2;
+    if (thumb_range < 1) {
+      thumb_range = 1;
+    }
+    const int16_t thumb_y = track_y + 1 +
+                            static_cast<int16_t>((static_cast<float>(world.menu_scroll) / scroll_range) * thumb_range);
+    canvas.fillRect(track_x + 1, thumb_y, 2, thumb_h, TFT_ORANGE);
+  }
+}
+
 void draw_hud_tape(
     M5Canvas& canvas,
     int16_t center_x,
@@ -1957,22 +2167,25 @@ void draw_enemy_direction_arrows(M5Canvas& canvas, const GameWorld& world) {
   }
 }
 
-void draw_reticle(M5Canvas& canvas, const Plane& player, bool auto_flight) {
+void draw_reticle(
+    M5Canvas& canvas, const Plane& player, bool auto_flight, bool show_reticle, bool show_lock_box) {
   const int cx = app_config::SCREEN_W / 2;
   const int cy = 70;
-  canvas.drawCircle(cx, cy, 3, TFT_DARKGREY);
-  canvas.drawFastHLine(cx - 6, cy, 12, TFT_DARKGREY);
-  canvas.drawFastVLine(cx, cy - 6, 12, TFT_DARKGREY);
+  if (show_reticle) {
+    canvas.drawCircle(cx, cy, 3, TFT_DARKGREY);
+    canvas.drawFastHLine(cx - 6, cy, 12, TFT_DARKGREY);
+    canvas.drawFastVLine(cx, cy - 6, 12, TFT_DARKGREY);
 
-  const int gun_x = cx + static_cast<int>(player.gunX * 0.36);
-  const int gun_y = cy - static_cast<int>((player.gunY - 20.0) * 0.36);
-  const uint16_t reticle_color = auto_flight ? TFT_YELLOW : TFT_CYAN;
-  canvas.drawCircle(gun_x, gun_y, app_config::RETICLE_RADIUS, reticle_color);
-  canvas.drawFastHLine(gun_x - 14, gun_y, 28, reticle_color);
-  canvas.drawFastVLine(gun_x, gun_y - 14, 28, reticle_color);
-  canvas.drawCircle(gun_x, gun_y, 2, reticle_color);
+    const int gun_x = cx + static_cast<int>(player.gunX * 0.36);
+    const int gun_y = cy - static_cast<int>((player.gunY - 20.0) * 0.36);
+    const uint16_t reticle_color = auto_flight ? TFT_YELLOW : TFT_CYAN;
+    canvas.drawCircle(gun_x, gun_y, app_config::RETICLE_RADIUS, reticle_color);
+    canvas.drawFastHLine(gun_x - 14, gun_y, 28, reticle_color);
+    canvas.drawFastVLine(gun_x, gun_y - 14, 28, reticle_color);
+    canvas.drawCircle(gun_x, gun_y, 2, reticle_color);
+  }
 
-  if (player.targetSx > -1000) {
+  if (show_lock_box && player.targetSx > -1000) {
     canvas.drawRect(player.targetSx - 6, player.targetSy - 6, 12, 12, TFT_RED);
   }
 }
@@ -1981,39 +2194,45 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
   const Plane& player = world.plane[0];
   canvas.setTextFont(1);
   canvas.setTextSize(1);
-  if (world.chrome_visible) {
+  if (world.chrome_visible && world.ui_mode_banner_visible) {
     draw_mode_banner(canvas, world.auto_flight);
+  }
 
+  if (world.chrome_visible && world.ui_header_visible) {
     canvas.setTextColor(TFT_GREEN, TFT_BLACK);
     canvas.setCursor(0, 0);
     canvas.print("NekoFlight ADV");
     draw_battery_status(canvas, canvas.width());
   }
 
-  draw_hud_tape(
-      canvas,
-      canvas.width() / 2 - 26,
-      70,
-      static_cast<int>(player.vpVel.abs()),
-      10,
-      50,
-      40,
-      true,
-      "SPD",
-      TFT_CYAN);
-  draw_hud_tape(
-      canvas,
-      canvas.width() / 2 + 26,
-      70,
-      static_cast<int>(player.height),
-      100,
-      500,
-      400,
-      false,
-      "ALT",
-      TFT_GREENYELLOW);
+  if (world.ui_speed_visible) {
+    draw_hud_tape(
+        canvas,
+        canvas.width() / 2 - 26,
+        70,
+        static_cast<int>(player.vpVel.abs()),
+        10,
+        50,
+        40,
+        true,
+        "SPD",
+        TFT_CYAN);
+  }
+  if (world.ui_altitude_visible) {
+    draw_hud_tape(
+        canvas,
+        canvas.width() / 2 + 26,
+        70,
+        static_cast<int>(player.height),
+        100,
+        500,
+        400,
+        false,
+        "ALT",
+        TFT_GREENYELLOW);
+  }
 
-  if (player.targetDis > 0.0) {
+  if (world.ui_tgt_visible && player.targetDis > 0.0) {
     const int16_t panel_x = canvas.width() - 60;
     const int16_t panel_y = 22;
     const int16_t panel_w = 36;
@@ -2027,7 +2246,7 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
     canvas.printf("%4d", static_cast<int>(player.targetDis));
   }
 
-  if (world.chrome_visible) {
+  if (world.chrome_visible && world.ui_footer_visible) {
     canvas.setTextColor(player.gunTemp > Plane::MAXT * 3 / 4 ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
     canvas.setCursor(0, app_config::FOOTER_Y);
     canvas.printf("A:Fire S:Boost R:Reset Ent:Auto / Gun:%02d", player.gunTemp);
@@ -2039,10 +2258,17 @@ void GameWorld::draw(M5Canvas& canvas) {
   plane[0].checkTrans();
   writeGround(canvas);
   writePlane(canvas);
-  draw_attitude_hud(canvas, plane[0]);
-  draw_enemy_direction_arrows(canvas, *this);
-  draw_reticle(canvas, plane[0], auto_flight);
+  if (ui_attitude_visible) {
+    draw_attitude_hud(canvas, plane[0]);
+  }
+  if (ui_enemy_arrows_visible) {
+    draw_enemy_direction_arrows(canvas, *this);
+  }
+  if (ui_reticle_visible || ui_lock_box_visible) {
+    draw_reticle(canvas, plane[0], auto_flight, ui_reticle_visible, ui_lock_box_visible);
+  }
   draw_hud(canvas, *this);
+  draw_popup_menu(canvas, *this);
 }
 
 void update_controls() {
@@ -2057,24 +2283,50 @@ void update_controls() {
   const bool boost = contains_char_key(status, 's') || contains_char_key(status, 'S');
   const bool reset = contains_char_key(status, 'r') || contains_char_key(status, 'R');
   const bool toggle_chrome = contains_char_key(status, '`') || contains_char_key(status, '~');
+  const bool toggle_menu = status.fn;
   const bool toggle_auto = status.enter;
 
-  g_world.control.up = up;
-  g_world.control.down = down;
-  g_world.control.left = left;
-  g_world.control.right = right;
-  g_world.control.rudder_left = rudder_left;
-  g_world.control.rudder_right = rudder_right;
-  g_world.control.shoot = shoot;
-  g_world.control.boost = boost;
-
-  if (reset && !g_prev_reset) {
-    const bool chrome_visible = g_world.chrome_visible;
-    g_world.init();
-    g_world.chrome_visible = chrome_visible;
+  if (toggle_menu && !g_prev_fn) {
+    g_world.menu_visible = !g_world.menu_visible;
     g_needs_redraw = true;
   }
+  g_prev_fn = toggle_menu;
+
+  const bool menu_active = g_world.menu_visible;
+  g_world.control.up = menu_active ? false : up;
+  g_world.control.down = menu_active ? false : down;
+  g_world.control.left = menu_active ? false : left;
+  g_world.control.right = menu_active ? false : right;
+  g_world.control.rudder_left = menu_active ? false : rudder_left;
+  g_world.control.rudder_right = menu_active ? false : rudder_right;
+  g_world.control.shoot = menu_active ? false : shoot;
+  g_world.control.boost = menu_active ? false : boost;
+
+  if (menu_active) {
+    if (up && !g_prev_menu_up) {
+      g_world.menu_index = (g_world.menu_index + kUiMenuItemCount - 1) % kUiMenuItemCount;
+      if (g_world.menu_index < g_world.menu_scroll) {
+        g_world.menu_scroll = g_world.menu_index;
+      } else if (g_world.menu_index >= g_world.menu_scroll + kUiMenuVisibleRows) {
+        g_world.menu_scroll = g_world.menu_index - kUiMenuVisibleRows + 1;
+      }
+      g_needs_redraw = true;
+    }
+    if (down && !g_prev_menu_down) {
+      g_world.menu_index = (g_world.menu_index + 1) % kUiMenuItemCount;
+      if (g_world.menu_index < g_world.menu_scroll) {
+        g_world.menu_scroll = g_world.menu_index;
+      } else if (g_world.menu_index >= g_world.menu_scroll + kUiMenuVisibleRows) {
+        g_world.menu_scroll = g_world.menu_index - kUiMenuVisibleRows + 1;
+      }
+      g_needs_redraw = true;
+    }
+  } else if (reset && !g_prev_reset) {
+    reset_stage_preserve_ui(g_world);
+  }
   g_prev_reset = reset;
+  g_prev_menu_up = up;
+  g_prev_menu_down = down;
 
   if (toggle_chrome && !g_prev_esc) {
     g_world.chrome_visible = !g_world.chrome_visible;
@@ -2083,7 +2335,11 @@ void update_controls() {
   g_prev_esc = toggle_chrome;
 
   if (toggle_auto && !g_prev_enter) {
-    g_world.auto_flight = !g_world.auto_flight;
+    if (menu_active) {
+      toggle_ui_menu_value(g_world, g_world.menu_index);
+    } else {
+      g_world.auto_flight = !g_world.auto_flight;
+    }
     g_needs_redraw = true;
   }
   g_prev_enter = toggle_auto;
