@@ -175,7 +175,7 @@ Point2D project_point(const Vec3& point, int16_t center_x, int16_t center_y, flo
   const float perspective = scale / depth;
   Point2D projected = {
       static_cast<int16_t>(center_x + point.x * perspective),
-      static_cast<int16_t>(center_y + point.y * perspective),
+      static_cast<int16_t>(center_y - point.y * perspective),
   };
   return projected;
 }
@@ -183,9 +183,11 @@ Point2D project_point(const Vec3& point, int16_t center_x, int16_t center_y, flo
 void draw_cube(int16_t center_x, int16_t center_y, float scale) {
   auto& display = g_canvas;
 
-  const float roll_rad = g_roll_deg * DEG_TO_RAD;
-  const float pitch_rad = g_pitch_deg * DEG_TO_RAD;
-  const float yaw_rad = g_yaw_deg * DEG_TO_RAD;
+  // The screen is fixed to the device, so the model needs the inverse attitude
+  // to appear to move in the same direction as the physical unit.
+  const float roll_rad = -g_roll_deg * DEG_TO_RAD;
+  const float pitch_rad = -g_pitch_deg * DEG_TO_RAD;
+  const float yaw_rad = -g_yaw_deg * DEG_TO_RAD;
 
   Vec3 rotated[8];
   Point2D projected[8];
