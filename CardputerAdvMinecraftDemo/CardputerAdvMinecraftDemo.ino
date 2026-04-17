@@ -89,6 +89,28 @@ struct ResolutionMode {
   const char* label;
 };
 
+struct InputLatch {
+  bool move_forward = false;
+  bool move_back = false;
+  bool move_left = false;
+  bool move_right = false;
+  bool turn_left = false;
+  bool turn_right = false;
+  bool look_up = false;
+  bool look_down = false;
+  bool move_down = false;
+  bool move_up = false;
+  bool jump = false;
+  bool break_block = false;
+  bool place_block = false;
+  bool cycle_block = false;
+  bool toggle_footer = false;
+  bool toggle_help = false;
+  bool toggle_header = false;
+  bool toggle_fly = false;
+  bool reset_world = false;
+};
+
 M5Canvas g_canvas(&M5Cardputer.Display);
 uint8_t g_world[app_config::WORLD_W][app_config::WORLD_H][app_config::WORLD_D];
 float g_column_factor[app_config::RENDER_W];
@@ -107,6 +129,9 @@ uint32_t g_frame_counter = 0;
 uint32_t g_last_fps_sample_ms = 0;
 uint16_t g_fps = 0;
 bool g_show_help = true;
+bool g_show_header = true;
+bool g_show_footer = true;
+InputLatch g_latched_input;
 
 bool g_prev_break = false;
 bool g_prev_place = false;
@@ -114,6 +139,9 @@ bool g_prev_cycle = false;
 bool g_prev_jump = false;
 bool g_prev_fly_toggle = false;
 bool g_prev_reset = false;
+bool g_prev_help_toggle = false;
+bool g_prev_header_toggle = false;
+bool g_prev_footer_toggle = false;
 
 constexpr uint8_t kSelectableBlocks[] = {
     BLOCK_GRASS,
@@ -139,6 +167,7 @@ uint32_t g_motion_resolution_until_ms = 0;
 uint32_t g_last_frame_present_ms = 0;
 uint16_t g_last_frame_interval_ms = 0;
 uint8_t g_good_motion_frames = 0;
+uint8_t g_forced_low_res_frames = 0;
 
 float clampf(float value, float min_value, float max_value) {
   if (value < min_value) {
@@ -593,7 +622,20 @@ Vec3 camera_up() {
 }
 
 uint8_t active_resolution_mode_index() {
+  if (g_forced_low_res_frames > 0) {
+    return g_dynamic_motion_resolution_mode_index;
+  }
   return millis() < g_motion_resolution_until_ms ? g_dynamic_motion_resolution_mode_index : 0;
+}
+
+void request_low_res_redraw(uint8_t frames = 1U) {
+  if (millis() >= g_motion_resolution_until_ms) {
+    g_dynamic_motion_resolution_mode_index = g_motion_resolution_mode_index;
+    g_good_motion_frames = 0;
+  }
+  if (frames > g_forced_low_res_frames) {
+    g_forced_low_res_frames = frames;
+  }
 }
 
 void update_dynamic_motion_resolution() {
@@ -811,6 +853,28 @@ bool motion_input_active(const Keyboard_Class::KeysState& status) {
          key_pressed(status, 'g');
 }
 
+void latch_render_input(const Keyboard_Class::KeysState& status) {
+  g_latched_input.move_forward |= key_pressed(status, 'w');
+  g_latched_input.move_back |= key_pressed(status, 's');
+  g_latched_input.move_left |= key_pressed(status, 'a');
+  g_latched_input.move_right |= key_pressed(status, 'd');
+  g_latched_input.turn_left |= key_pressed(status, 'j');
+  g_latched_input.turn_right |= key_pressed(status, 'l');
+  g_latched_input.look_up |= key_pressed(status, 'i');
+  g_latched_input.look_down |= key_pressed(status, 'k');
+  g_latched_input.move_down |= key_pressed(status, 'q');
+  g_latched_input.move_up |= key_pressed(status, 'e');
+  g_latched_input.jump |= key_pressed(status, 'g');
+  g_latched_input.break_block |= key_pressed(status, 'z');
+  g_latched_input.place_block |= key_pressed(status, 'x');
+  g_latched_input.cycle_block |= key_pressed(status, 'c');
+  g_latched_input.toggle_footer |= key_pressed(status, 'b');
+  g_latched_input.toggle_help |= key_pressed(status, 'h');
+  g_latched_input.toggle_header |= key_pressed(status, 'u');
+  g_latched_input.toggle_fly |= key_pressed(status, 'f');
+  g_latched_input.reset_world |= key_pressed(status, 'r');
+}
+
 void update_target_ray() {
   g_target = cast_ray(player_eye_position(), normalize_vec3(forward_vector()), app_config::TARGET_MAX_DISTANCE);
 }
@@ -845,23 +909,33 @@ void place_selected_block() {
 
 void update_game(float dt) {
   const auto status = M5Cardputer.Keyboard.keysState();
+  const InputLatch latched = g_latched_input;
+  g_latched_input = {};
+  const float prev_x = g_player.x;
+  const float prev_y = g_player.y;
+  const float prev_z = g_player.z;
+  const float prev_yaw = g_player.yaw_deg;
+  const float prev_pitch = g_player.pitch_deg;
 
-  const bool move_forward = key_pressed(status, 'w');
-  const bool move_back = key_pressed(status, 's');
-  const bool move_left = key_pressed(status, 'a');
-  const bool move_right = key_pressed(status, 'd');
-  const bool turn_left = key_pressed(status, 'j');
-  const bool turn_right = key_pressed(status, 'l');
-  const bool look_up = key_pressed(status, 'i');
-  const bool look_down = key_pressed(status, 'k');
-  const bool move_down = key_pressed(status, 'q');
-  const bool move_up = key_pressed(status, 'e');
-  const bool jump_key = key_pressed(status, 'g');
-  const bool break_key = key_pressed(status, 'z');
-  const bool place_key = key_pressed(status, 'x');
-  const bool cycle_key = key_pressed(status, 'c');
-  const bool fly_toggle = key_pressed(status, 'f');
-  const bool reset_key = key_pressed(status, 'r');
+  const bool move_forward = key_pressed(status, 'w') || latched.move_forward;
+  const bool move_back = key_pressed(status, 's') || latched.move_back;
+  const bool move_left = key_pressed(status, 'a') || latched.move_left;
+  const bool move_right = key_pressed(status, 'd') || latched.move_right;
+  const bool turn_left = key_pressed(status, 'j') || latched.turn_left;
+  const bool turn_right = key_pressed(status, 'l') || latched.turn_right;
+  const bool look_up = key_pressed(status, 'i') || latched.look_up;
+  const bool look_down = key_pressed(status, 'k') || latched.look_down;
+  const bool move_down = key_pressed(status, 'q') || latched.move_down;
+  const bool move_up = key_pressed(status, 'e') || latched.move_up;
+  const bool jump_key = key_pressed(status, 'g') || latched.jump;
+  const bool break_key = key_pressed(status, 'z') || latched.break_block;
+  const bool place_key = key_pressed(status, 'x') || latched.place_block;
+  const bool cycle_key = key_pressed(status, 'c') || latched.cycle_block;
+  const bool footer_key = key_pressed(status, 'b') || latched.toggle_footer;
+  const bool help_key = key_pressed(status, 'h') || latched.toggle_help;
+  const bool header_key = key_pressed(status, 'u') || latched.toggle_header;
+  const bool fly_toggle = key_pressed(status, 'f') || latched.toggle_fly;
+  const bool reset_key = key_pressed(status, 'r') || latched.reset_world;
 
   g_player.yaw_deg +=
       ((turn_right ? 1.0f : 0.0f) - (turn_left ? 1.0f : 0.0f)) * app_config::TURN_SPEED_DEG * dt;
@@ -882,20 +956,28 @@ void update_game(float dt) {
 
   if (cycle_key && !g_prev_cycle) {
     g_player.selected_slot = (g_player.selected_slot + 1) % (sizeof(kSelectableBlocks) / sizeof(kSelectableBlocks[0]));
+    request_low_res_redraw();
   }
   g_prev_cycle = cycle_key;
 
-  const bool motion_requested =
+  if (help_key && !g_prev_help_toggle) {
+    g_show_help = !g_show_help;
+  }
+  g_prev_help_toggle = help_key;
+
+  if (footer_key && !g_prev_footer_toggle) {
+    g_show_footer = !g_show_footer;
+  }
+  g_prev_footer_toggle = footer_key;
+
+  if (header_key && !g_prev_header_toggle) {
+    g_show_header = !g_show_header;
+  }
+  g_prev_header_toggle = header_key;
+  const bool motion_input_requested =
       move_forward || move_back || move_left || move_right ||
       turn_left || turn_right || look_up || look_down ||
-      move_up || move_down || jump_key || fabsf(g_player.velocity_y) > 0.05f;
-  if (motion_requested) {
-    if (millis() >= g_motion_resolution_until_ms) {
-      g_dynamic_motion_resolution_mode_index = g_motion_resolution_mode_index;
-      g_good_motion_frames = 0;
-    }
-    g_motion_resolution_until_ms = millis() + 180U;
-  }
+      move_up || move_down || jump_key;
 
   Vec3 move_dir = make_vec3(0.0f, 0.0f, 0.0f);
   Vec3 flat_forward = camera_forward();
@@ -942,15 +1024,31 @@ void update_game(float dt) {
   apply_vertical_motion(dt);
   update_target_ray();
 
+  const bool pose_changed =
+      fabsf(g_player.x - prev_x) > 0.001f ||
+      fabsf(g_player.y - prev_y) > 0.001f ||
+      fabsf(g_player.z - prev_z) > 0.001f ||
+      fabsf(g_player.yaw_deg - prev_yaw) > 0.001f ||
+      fabsf(g_player.pitch_deg - prev_pitch) > 0.001f;
+  if (motion_input_requested || pose_changed) {
+    if (millis() >= g_motion_resolution_until_ms) {
+      g_dynamic_motion_resolution_mode_index = g_motion_resolution_mode_index;
+      g_good_motion_frames = 0;
+    }
+    g_motion_resolution_until_ms = millis() + 180U;
+  }
+
   if (break_key && !g_prev_break) {
     break_target_block();
     update_target_ray();
+    request_low_res_redraw();
   }
   g_prev_break = break_key;
 
   if (place_key && !g_prev_place) {
     place_selected_block();
     update_target_ray();
+    request_low_res_redraw();
   }
   g_prev_place = place_key;
 }
@@ -1023,9 +1121,11 @@ bool render_scene() {
   }
 
   for (int py = 0; py < render_h; ++py) {
-    if (native_mode && (py & 0x03) == 0) {
+    if ((py & 0x03) == 0) {
       M5Cardputer.update();
-      if (motion_input_active(M5Cardputer.Keyboard.keysState())) {
+      const auto status = M5Cardputer.Keyboard.keysState();
+      latch_render_input(status);
+      if (native_mode && motion_input_active(status)) {
         g_motion_resolution_until_ms = millis() + 180U;
         g_dynamic_motion_resolution_mode_index = g_motion_resolution_mode_index;
         g_good_motion_frames = 0;
@@ -1072,52 +1172,57 @@ void draw_hud() {
   const uint8_t selected_block = kSelectableBlocks[g_player.selected_slot];
   const uint8_t active_resolution_index = active_resolution_mode_index();
 
-  g_canvas.fillRect(0, 0, app_config::SCREEN_W, 26, TFT_BLACK);
-  g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
-  g_canvas.setCursor(2, 2);
-  g_canvas.printf(
-      "ADV Minecraft  %s  FPS:%u",
-      g_player.fly_mode ? "FLY" : "WALK",
-      g_fps);
-  g_canvas.setCursor(2, 10);
-  g_canvas.printf(
-      "Idle:%s Move:%s",
-      kResolutionModes[0].label,
-      kResolutionModes[g_dynamic_motion_resolution_mode_index].label);
-  g_canvas.setCursor(2, 18);
-  g_canvas.printf(
-      "%s  Block:%s",
-      kResolutionModes[active_resolution_index].label,
-      block_name(selected_block));
-  g_canvas.setCursor(108, 18);
-  g_canvas.printf(
-      "Pos:%d,%d,%d",
-      static_cast<int>(g_player.x),
-      static_cast<int>(g_player.y),
-      static_cast<int>(g_player.z));
+  if (g_show_header) {
+    g_canvas.fillRect(0, 0, app_config::SCREEN_W, 26, TFT_BLACK);
+    g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    g_canvas.setCursor(2, 2);
+    g_canvas.printf(
+        "ADV Minecraft  %s  FPS:%u",
+        g_player.fly_mode ? "FLY" : "WALK",
+        g_fps);
+    g_canvas.setCursor(2, 10);
+    g_canvas.printf(
+        "Idle:%s Move:%s",
+        kResolutionModes[0].label,
+        kResolutionModes[g_dynamic_motion_resolution_mode_index].label);
+    g_canvas.setCursor(2, 18);
+    g_canvas.printf(
+        "%s  Pos:%d,%d,%d",
+        kResolutionModes[active_resolution_index].label,
+        static_cast<int>(g_player.x),
+        static_cast<int>(g_player.y),
+        static_cast<int>(g_player.z));
+  }
 
+  g_canvas.setTextColor(TFT_WHITE);
   g_canvas.drawFastHLine(center_x - 5, center_y, 11, TFT_WHITE);
   g_canvas.drawFastVLine(center_x, center_y - 5, 11, TFT_WHITE);
 
-  g_canvas.fillRect(0, app_config::SCREEN_H - 12, app_config::SCREEN_W, 12, TFT_BLACK);
-  g_canvas.setCursor(2, app_config::SCREEN_H - 10);
-  if (g_target.hit) {
+  if (g_show_footer) {
+    g_canvas.setCursor(2, app_config::SCREEN_H - 10);
+    if (g_target.hit) {
+      g_canvas.printf(
+          "Target:%s @ %d,%d,%d",
+          block_name(g_target.block),
+          g_target.x,
+          g_target.y,
+          g_target.z);
+    } else {
+      g_canvas.print("Target:none");
+    }
+
+    g_canvas.setCursor(2, app_config::SCREEN_H - 18);
     g_canvas.printf(
-        "Target:%s @ %d,%d,%d",
-        block_name(g_target.block),
-        g_target.x,
-        g_target.y,
-        g_target.z);
-  } else {
-    g_canvas.print("Target:none");
+        "Block:%s",
+        block_name(selected_block));
   }
 
   if (!g_show_help) {
     return;
   }
 
-  g_canvas.fillRect(12, 22, 216, 56, TFT_BLACK);
-  g_canvas.drawRect(12, 22, 216, 56, TFT_DARKGREY);
+  g_canvas.fillRect(12, 22, 216, 68, TFT_BLACK);
+  g_canvas.drawRect(12, 22, 216, 68, TFT_DARKGREY);
   g_canvas.setTextColor(TFT_CYAN, TFT_BLACK);
   g_canvas.setCursor(18, 28);
   g_canvas.print("WASD move  JL turn  IK look");
@@ -1126,7 +1231,9 @@ void draw_hud() {
   g_canvas.setCursor(18, 52);
   g_canvas.print("Z break  X place  C block");
   g_canvas.setCursor(18, 64);
-  g_canvas.print("R regen  BtnA help");
+  g_canvas.print("R regen  H help");
+  g_canvas.setCursor(18, 76);
+  g_canvas.print("U header  B footer");
 }
 
 bool draw_frame() {
@@ -1201,10 +1308,6 @@ void setup() {
 void loop() {
   M5Cardputer.update();
 
-  if (M5Cardputer.BtnA.wasClicked()) {
-    g_show_help = !g_show_help;
-  }
-
   const uint32_t now = millis();
   float dt = static_cast<float>(now - g_last_tick_ms) / 1000.0f;
   g_last_tick_ms = now;
@@ -1214,6 +1317,9 @@ void loop() {
 
   if (now - g_last_draw_ms >= app_config::FRAME_INTERVAL_MS) {
     if (draw_frame()) {
+      if (g_forced_low_res_frames > 0) {
+        --g_forced_low_res_frames;
+      }
       const uint32_t frame_end_ms = millis();
       g_last_frame_interval_ms = static_cast<uint16_t>(frame_end_ms - g_last_frame_present_ms);
       g_last_frame_present_ms = frame_end_ms;
