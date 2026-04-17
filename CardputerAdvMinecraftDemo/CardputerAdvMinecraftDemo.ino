@@ -1,13 +1,14 @@
 #include <Arduino.h>
 #include <M5Cardputer.h>
 #include <math.h>
+#include "PescadoCore.h"
 
 namespace app_config {
 constexpr int16_t SCREEN_W = 240;
 constexpr int16_t SCREEN_H = 135;
-constexpr int16_t LOWRES_W = 80;
-constexpr int16_t LOWRES_H = 45;
-constexpr int16_t PIXEL_SCALE = 3;
+constexpr int16_t RENDER_W = SCREEN_W;
+constexpr int16_t RENDER_H = SCREEN_H;
+constexpr uint8_t TEXTURE_SIZE = 8;
 
 constexpr int WORLD_W = 32;
 constexpr int WORLD_H = 18;
@@ -48,10 +49,13 @@ enum BlockType : uint8_t {
   BLOCK_COUNT
 };
 
-struct Vec3 {
-  float x;
-  float y;
-  float z;
+using Vec3 = pescado_core::Vec3;
+using Mat3 = pescado_core::Matrix3x3;
+
+struct ColorRgb {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
 };
 
 struct RayHit {
@@ -80,13 +84,19 @@ struct PlayerState {
   uint8_t selected_slot = 0;
 };
 
+struct ResolutionMode {
+  uint8_t pixel_step;
+  const char* label;
+};
+
 M5Canvas g_canvas(&M5Cardputer.Display);
 uint8_t g_world[app_config::WORLD_W][app_config::WORLD_H][app_config::WORLD_D];
-float g_column_factor[app_config::LOWRES_W];
-float g_row_factor[app_config::LOWRES_H];
-uint16_t g_block_shades[BLOCK_COUNT][4];
-uint16_t g_sky_colors[app_config::LOWRES_H];
-uint16_t g_ground_colors[app_config::LOWRES_H];
+float g_column_factor[app_config::RENDER_W];
+float g_row_factor[app_config::RENDER_H];
+ColorRgb g_face_textures[BLOCK_COUNT][3][app_config::TEXTURE_SIZE * app_config::TEXTURE_SIZE];
+uint16_t g_sky_colors[app_config::RENDER_H];
+uint16_t g_ground_colors[app_config::RENDER_H];
+uint16_t g_scanline[app_config::RENDER_W];
 
 PlayerState g_player;
 RayHit g_target = {};
@@ -104,6 +114,7 @@ bool g_prev_cycle = false;
 bool g_prev_jump = false;
 bool g_prev_fly_toggle = false;
 bool g_prev_reset = false;
+bool g_prev_resolution_toggle = false;
 
 constexpr uint8_t kSelectableBlocks[] = {
     BLOCK_GRASS,
@@ -116,6 +127,14 @@ constexpr uint8_t kSelectableBlocks[] = {
     BLOCK_GLASS,
     BLOCK_CACTUS,
 };
+
+constexpr ResolutionMode kResolutionModes[] = {
+    {1, "240x135"},
+    {2, "120x68"},
+    {3, "80x45"},
+    {4, "60x34"},
+};
+uint8_t g_resolution_mode_index = 1;
 
 float clampf(float value, float min_value, float max_value) {
   if (value < min_value) {
@@ -188,35 +207,27 @@ float fbm_noise(float x, float z, uint32_t seed) {
 }
 
 Vec3 make_vec3(float x, float y, float z) {
-  Vec3 v = {x, y, z};
-  return v;
+  return Vec3(x, y, z);
 }
 
 Vec3 add_vec3(const Vec3& a, const Vec3& b) {
-  return make_vec3(a.x + b.x, a.y + b.y, a.z + b.z);
+  return a + b;
 }
 
 Vec3 scale_vec3(const Vec3& v, float scale) {
-  return make_vec3(v.x * scale, v.y * scale, v.z * scale);
+  return v * scale;
 }
 
 Vec3 cross_vec3(const Vec3& a, const Vec3& b) {
-  return make_vec3(
-      a.y * b.z - a.z * b.y,
-      a.z * b.x - a.x * b.z,
-      a.x * b.y - a.y * b.x);
+  return pescado_core::CrossProduct(a, b);
 }
 
 float length_vec3(const Vec3& v) {
-  return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+  return v.Magnitude();
 }
 
 Vec3 normalize_vec3(const Vec3& v) {
-  const float len = length_vec3(v);
-  if (len <= 0.0001f) {
-    return make_vec3(0.0f, 0.0f, 0.0f);
-  }
-  return make_vec3(v.x / len, v.y / len, v.z / len);
+  return v.Normalized();
 }
 
 bool in_world(int x, int y, int z) {
@@ -259,32 +270,172 @@ const char* block_name(uint8_t block) {
   }
 }
 
-uint16_t block_base_color(uint8_t block) {
+ColorRgb make_rgb(uint8_t r, uint8_t g, uint8_t b) {
+  ColorRgb color = {r, g, b};
+  return color;
+}
+
+ColorRgb shade_rgb(const ColorRgb& color, float factor) {
+  return make_rgb(
+      static_cast<uint8_t>(clampf(color.r * factor, 0.0f, 255.0f)),
+      static_cast<uint8_t>(clampf(color.g * factor, 0.0f, 255.0f)),
+      static_cast<uint8_t>(clampf(color.b * factor, 0.0f, 255.0f)));
+}
+
+uint16_t rgb_to_565(const ColorRgb& color) {
+  return lgfx::v1::color565(color.r, color.g, color.b);
+}
+
+uint16_t output_color_565(const ColorRgb& color) {
+  return rgb_to_565(color);
+}
+
+ColorRgb block_base_color(uint8_t block) {
   switch (block) {
-    case BLOCK_GRASS: return TFT_GREENYELLOW;
-    case BLOCK_DIRT: return TFT_BROWN;
-    case BLOCK_STONE: return TFT_LIGHTGREY;
-    case BLOCK_SAND: return TFT_YELLOW;
-    case BLOCK_WATER: return TFT_BLUE;
-    case BLOCK_LOG: return 0x9A60;
-    case BLOCK_LEAVES: return TFT_GREEN;
-    case BLOCK_BRICKS: return TFT_RED;
-    case BLOCK_GLASS: return TFT_CYAN;
-    case BLOCK_BEDROCK: return TFT_DARKGREY;
-    case BLOCK_CACTUS: return 0x05E0;
-    default: return TFT_BLACK;
+    case BLOCK_GRASS: return make_rgb(120, 184, 72);
+    case BLOCK_DIRT: return make_rgb(124, 84, 52);
+    case BLOCK_STONE: return make_rgb(136, 136, 140);
+    case BLOCK_SAND: return make_rgb(218, 206, 132);
+    case BLOCK_WATER: return make_rgb(52, 110, 204);
+    case BLOCK_LOG: return make_rgb(120, 92, 56);
+    case BLOCK_LEAVES: return make_rgb(52, 142, 60);
+    case BLOCK_BRICKS: return make_rgb(168, 76, 64);
+    case BLOCK_GLASS: return make_rgb(164, 214, 224);
+    case BLOCK_BEDROCK: return make_rgb(74, 74, 82);
+    case BLOCK_CACTUS: return make_rgb(42, 154, 72);
+    default: return make_rgb(0, 0, 0);
   }
 }
 
-uint16_t shade_color(uint16_t color, float factor) {
-  uint8_t r = (color >> 11) & 0x1F;
-  uint8_t g = (color >> 5) & 0x3F;
-  uint8_t b = color & 0x1F;
+constexpr uint8_t FACE_TEXTURE_TOP = 0;
+constexpr uint8_t FACE_TEXTURE_SIDE = 1;
+constexpr uint8_t FACE_TEXTURE_BOTTOM = 2;
 
-  r = static_cast<uint8_t>(clampf(r * factor, 0.0f, 31.0f));
-  g = static_cast<uint8_t>(clampf(g * factor, 0.0f, 63.0f));
-  b = static_cast<uint8_t>(clampf(b * factor, 0.0f, 31.0f));
-  return static_cast<uint16_t>((r << 11) | (g << 5) | b);
+float fracf_positive(float value) {
+  return value - floorf(value);
+}
+
+uint8_t texture_noise(int block, int face, int x, int y) {
+  return static_cast<uint8_t>(
+      hash_u32(
+          static_cast<uint32_t>(block * 92821 + face * 1237 + x * 97 + y * 57 + 17)) &
+      0xFFU);
+}
+
+void set_texture_texel(uint8_t block, uint8_t face, int x, int y, const ColorRgb& color) {
+  g_face_textures[block][face][y * app_config::TEXTURE_SIZE + x] = color;
+}
+
+void build_block_textures() {
+  const ColorRgb white = make_rgb(255, 255, 255);
+  const ColorRgb green_top = make_rgb(122, 196, 78);
+  const ColorRgb dirt = make_rgb(124, 84, 52);
+  const ColorRgb sand = make_rgb(218, 206, 132);
+  const ColorRgb water = make_rgb(54, 110, 210);
+  const ColorRgb water_highlight = make_rgb(120, 210, 255);
+  const ColorRgb wood = make_rgb(120, 92, 56);
+  const ColorRgb leaf = make_rgb(56, 144, 60);
+  const ColorRgb mortar = make_rgb(164, 164, 170);
+  const ColorRgb brick = make_rgb(168, 76, 64);
+  const ColorRgb glass = make_rgb(110, 180, 200);
+  const ColorRgb bedrock = make_rgb(74, 74, 82);
+  const ColorRgb cactus = make_rgb(42, 154, 72);
+  const ColorRgb cactus_dark = make_rgb(30, 108, 52);
+  const ColorRgb cactus_core = make_rgb(104, 88, 48);
+
+  for (int block = 0; block < BLOCK_COUNT; ++block) {
+    for (int face = 0; face < 3; ++face) {
+      for (int y = 0; y < app_config::TEXTURE_SIZE; ++y) {
+        for (int x = 0; x < app_config::TEXTURE_SIZE; ++x) {
+          const uint8_t noise = texture_noise(block, face, x, y);
+          const float noise_factor = 0.82f + (static_cast<float>(noise) / 255.0f) * 0.30f;
+          ColorRgb color = shade_rgb(block_base_color(static_cast<uint8_t>(block)), noise_factor);
+
+          switch (block) {
+            case BLOCK_GRASS:
+              if (face == FACE_TEXTURE_TOP) {
+                const bool patch = ((x ^ y) & 1) == 0;
+                color = shade_rgb(green_top, patch ? 1.02f : 0.88f + noise_factor * 0.10f);
+              } else if (face == FACE_TEXTURE_SIDE) {
+                if (y < 2) {
+                  color = shade_rgb(green_top, 0.90f + 0.04f * (2 - y));
+                } else {
+                  color = shade_rgb(dirt, 0.76f + (noise_factor - 0.82f) * 0.6f);
+                }
+              } else {
+                color = shade_rgb(dirt, 0.80f + (noise_factor - 0.82f) * 0.8f);
+              }
+              break;
+            case BLOCK_DIRT:
+              color = shade_rgb(dirt, 0.74f + (static_cast<float>(noise) / 255.0f) * 0.35f);
+              break;
+            case BLOCK_STONE:
+              color = shade_rgb(make_rgb(136, 136, 140), 0.68f + (static_cast<float>(noise) / 255.0f) * 0.42f);
+              break;
+            case BLOCK_SAND:
+              color = shade_rgb(sand, 0.86f + (static_cast<float>((noise + y * 17) & 0xFFU) / 255.0f) * 0.20f);
+              break;
+            case BLOCK_WATER:
+              color = shade_rgb(water, ((x + y) & 1) == 0 ? 0.82f : 0.66f);
+              if ((y == 1 || y == 5) && x > 0 && x < 7) {
+                color = shade_rgb(water_highlight, 0.92f);
+              }
+              break;
+            case BLOCK_LOG:
+              if (face == FACE_TEXTURE_SIDE) {
+                const bool stripe = (x == 1 || x == 4 || x == 6);
+                color = shade_rgb(wood, stripe ? 0.72f : 0.96f);
+              } else {
+                const int dx = x - 3;
+                const int dy = y - 3;
+                const int dist2 = dx * dx + dy * dy;
+                color = shade_rgb(wood, 0.72f + (dist2 % 5) * 0.07f);
+              }
+              break;
+            case BLOCK_LEAVES:
+              color = shade_rgb(leaf, ((noise & 0x03U) == 0U) ? 0.60f : 0.92f);
+              break;
+            case BLOCK_BRICKS:
+              if (y == 0 || y == 4 || x == 0) {
+                color = shade_rgb(mortar, 0.50f);
+              } else if (y > 4 && x == 4) {
+                color = shade_rgb(mortar, 0.50f);
+              } else {
+                color = shade_rgb(brick, 0.75f + (static_cast<float>(noise) / 255.0f) * 0.25f);
+              }
+              break;
+            case BLOCK_GLASS:
+              color = shade_rgb(glass, 0.30f);
+              if (x == 0 || y == 0 || x == 7 || y == 7 || x == y || x + y == 7) {
+                color = shade_rgb(white, 0.62f);
+              }
+              break;
+            case BLOCK_BEDROCK:
+              color = shade_rgb(bedrock, 0.52f + (static_cast<float>(noise) / 255.0f) * 0.18f);
+              break;
+            case BLOCK_CACTUS:
+              if (face == FACE_TEXTURE_SIDE) {
+                const bool rib = (x == 1 || x == 4 || x == 6);
+                color = shade_rgb(cactus, rib ? 0.64f : 0.90f);
+                if (x == 0 || x == 7) {
+                  color = shade_rgb(cactus_dark, 0.90f);
+                }
+              } else {
+                color = shade_rgb(cactus, 0.86f);
+                if (x == 3 || y == 3 || x == 4 || y == 4) {
+                  color = shade_rgb(cactus_core, 0.60f);
+                }
+              }
+              break;
+            default:
+              break;
+          }
+
+          set_texture_texel(static_cast<uint8_t>(block), static_cast<uint8_t>(face), x, y, color);
+        }
+      }
+    }
+  }
 }
 
 int top_solid_y(int x, int z) {
@@ -419,6 +570,24 @@ Vec3 player_eye_position() {
   return make_vec3(g_player.x, g_player.y + app_config::CAMERA_HEIGHT, g_player.z);
 }
 
+Mat3 camera_rotation_matrix() {
+  const float yaw_rad = g_player.yaw_deg * DEG_TO_RAD;
+  const float pitch_rad = g_player.pitch_deg * DEG_TO_RAD;
+  return Mat3::RotY(-yaw_rad) * Mat3::RotZ(pitch_rad);
+}
+
+Vec3 camera_forward() {
+  return normalize_vec3(camera_rotation_matrix() * make_vec3(1.0f, 0.0f, 0.0f));
+}
+
+Vec3 camera_right() {
+  return normalize_vec3(camera_rotation_matrix() * make_vec3(0.0f, 0.0f, 1.0f));
+}
+
+Vec3 camera_up() {
+  return normalize_vec3(camera_rotation_matrix() * make_vec3(0.0f, 1.0f, 0.0f));
+}
+
 bool collides_aabb(float center_x, float feet_y, float center_z) {
   const float min_x = center_x - app_config::PLAYER_RADIUS;
   const float max_x = center_x + app_config::PLAYER_RADIUS;
@@ -508,10 +677,7 @@ void apply_vertical_motion(float dt) {
 }
 
 Vec3 forward_vector() {
-  const float yaw_rad = g_player.yaw_deg * DEG_TO_RAD;
-  const float pitch_rad = g_player.pitch_deg * DEG_TO_RAD;
-  const float cp = cosf(pitch_rad);
-  return make_vec3(cp * cosf(yaw_rad), sinf(pitch_rad), cp * sinf(yaw_rad));
+  return camera_forward();
 }
 
 RayHit cast_ray(const Vec3& origin, const Vec3& dir, float max_distance) {
@@ -651,6 +817,7 @@ void update_game(float dt) {
   const bool break_key = key_pressed(status, 'z');
   const bool place_key = key_pressed(status, 'x');
   const bool cycle_key = key_pressed(status, 'c');
+  const bool resolution_key = key_pressed(status, 'v');
   const bool fly_toggle = key_pressed(status, 'f');
   const bool reset_key = key_pressed(status, 'r');
 
@@ -676,10 +843,19 @@ void update_game(float dt) {
   }
   g_prev_cycle = cycle_key;
 
-  const float yaw_rad = g_player.yaw_deg * DEG_TO_RAD;
+  if (resolution_key && !g_prev_resolution_toggle) {
+    g_resolution_mode_index =
+        (g_resolution_mode_index + 1) % (sizeof(kResolutionModes) / sizeof(kResolutionModes[0]));
+  }
+  g_prev_resolution_toggle = resolution_key;
+
   Vec3 move_dir = make_vec3(0.0f, 0.0f, 0.0f);
-  const Vec3 flat_forward = make_vec3(cosf(yaw_rad), 0.0f, sinf(yaw_rad));
-  const Vec3 flat_right = make_vec3(-sinf(yaw_rad), 0.0f, cosf(yaw_rad));
+  Vec3 flat_forward = camera_forward();
+  flat_forward.y = 0.0f;
+  flat_forward = normalize_vec3(flat_forward);
+  Vec3 flat_right = camera_right();
+  flat_right.y = 0.0f;
+  flat_right = normalize_vec3(flat_right);
 
   if (move_forward) {
     move_dir = add_vec3(move_dir, flat_forward);
@@ -738,49 +914,95 @@ uint16_t background_color(int row, float dir_y) {
   return g_ground_colors[row];
 }
 
-uint16_t voxel_color_for_hit(const RayHit& hit) {
-  int shade = 1;
+uint8_t face_texture_group_for_hit(const RayHit& hit) {
   if (hit.axis == 1) {
-    shade = hit.face_sign > 0 ? 0 : 2;
-  } else if (hit.axis == 2) {
-    shade = 2;
+    return hit.face_sign > 0 ? FACE_TEXTURE_TOP : FACE_TEXTURE_BOTTOM;
+  }
+  return FACE_TEXTURE_SIDE;
+}
+
+uint16_t voxel_color_for_hit(const RayHit& hit, const Vec3& origin, const Vec3& dir) {
+  const Vec3 impact = add_vec3(origin, scale_vec3(dir, hit.distance));
+  float u = 0.0f;
+  float v = 0.0f;
+
+  if (hit.axis == 0) {
+    u = hit.face_sign > 0 ? 1.0f - fracf_positive(impact.z) : fracf_positive(impact.z);
+    v = 1.0f - fracf_positive(impact.y);
+  } else if (hit.axis == 1) {
+    u = fracf_positive(impact.x);
+    v = hit.face_sign > 0 ? fracf_positive(impact.z) : 1.0f - fracf_positive(impact.z);
+  } else {
+    u = hit.face_sign > 0 ? fracf_positive(impact.x) : 1.0f - fracf_positive(impact.x);
+    v = 1.0f - fracf_positive(impact.y);
   }
 
-  if (hit.distance > 7.0f) {
-    ++shade;
+  const int tex_x = static_cast<int>(clampf(u * app_config::TEXTURE_SIZE, 0.0f, app_config::TEXTURE_SIZE - 1.0f));
+  const int tex_y = static_cast<int>(clampf(v * app_config::TEXTURE_SIZE, 0.0f, app_config::TEXTURE_SIZE - 1.0f));
+  const uint8_t face_group = face_texture_group_for_hit(hit);
+  const ColorRgb texel =
+      g_face_textures[hit.block][face_group][tex_y * app_config::TEXTURE_SIZE + tex_x];
+
+  float light = 0.82f;
+  if (face_group == FACE_TEXTURE_TOP) {
+    light = 1.00f;
+  } else if (face_group == FACE_TEXTURE_BOTTOM) {
+    light = 0.66f;
   }
-  if (hit.distance > 14.0f) {
-    ++shade;
+
+  light *= 1.0f - clampf(hit.distance / app_config::RAY_MAX_DISTANCE, 0.0f, 1.0f) * 0.36f;
+  if (hit.block == BLOCK_WATER) {
+    light *= 0.92f;
   }
-  if (shade > 3) {
-    shade = 3;
-  }
-  return g_block_shades[hit.block][shade];
+
+  return output_color_565(shade_rgb(texel, light));
 }
 
 void render_scene() {
   g_canvas.fillScreen(TFT_BLACK);
 
-  const Vec3 forward = forward_vector();
-  const Vec3 right = normalize_vec3(make_vec3(-sinf(g_player.yaw_deg * DEG_TO_RAD), 0.0f, cosf(g_player.yaw_deg * DEG_TO_RAD)));
-  const Vec3 up = cross_vec3(right, forward);
+  const Vec3 forward = camera_forward();
+  const Vec3 right = camera_right();
+  const Vec3 up = camera_up();
   const Vec3 eye = player_eye_position();
+  const ResolutionMode mode = kResolutionModes[g_resolution_mode_index];
+  const int render_w = (app_config::RENDER_W + mode.pixel_step - 1) / mode.pixel_step;
+  const int render_h = (app_config::RENDER_H + mode.pixel_step - 1) / mode.pixel_step;
+  const bool native_mode = mode.pixel_step == 1;
 
-  for (int py = 0; py < app_config::LOWRES_H; ++py) {
-    for (int px = 0; px < app_config::LOWRES_W; ++px) {
+  if (native_mode) {
+    g_canvas.setSwapBytes(true);
+  }
+
+  for (int py = 0; py < render_h; ++py) {
+    const int y0 = py * mode.pixel_step;
+    const int block_h = min<int>(mode.pixel_step, app_config::RENDER_H - y0);
+    const int sample_y = min<int>(app_config::RENDER_H - 1, y0 + block_h / 2);
+
+    for (int px = 0; px < render_w; ++px) {
+      const int x0 = px * mode.pixel_step;
+      const int block_w = min<int>(mode.pixel_step, app_config::RENDER_W - x0);
+      const int sample_x = min<int>(app_config::RENDER_W - 1, x0 + block_w / 2);
       const Vec3 dir = add_vec3(
           forward,
-          add_vec3(scale_vec3(right, g_column_factor[px]), scale_vec3(up, g_row_factor[py])));
+          add_vec3(scale_vec3(right, g_column_factor[sample_x]), scale_vec3(up, g_row_factor[sample_y])));
       const RayHit hit = cast_ray(eye, dir, app_config::RAY_MAX_DISTANCE);
-      const uint16_t color = hit.hit ? voxel_color_for_hit(hit) : background_color(py, dir.y);
+      const uint16_t color =
+          hit.hit ? voxel_color_for_hit(hit, eye, dir) : background_color(sample_y, dir.y);
 
-      g_canvas.fillRect(
-          px * app_config::PIXEL_SCALE,
-          py * app_config::PIXEL_SCALE,
-          app_config::PIXEL_SCALE,
-          app_config::PIXEL_SCALE,
-          color);
+      if (mode.pixel_step == 1) {
+        g_scanline[px] = color;
+      } else {
+        g_canvas.fillRect(x0, y0, block_w, block_h, color);
+      }
     }
+    if (native_mode) {
+      g_canvas.pushImage(0, py, app_config::RENDER_W, 1, g_scanline);
+    }
+  }
+
+  if (native_mode) {
+    g_canvas.setSwapBytes(false);
   }
 }
 
@@ -789,7 +1011,7 @@ void draw_hud() {
   const int16_t center_y = app_config::SCREEN_H / 2;
   const uint8_t selected_block = kSelectableBlocks[g_player.selected_slot];
 
-  g_canvas.fillRect(0, 0, app_config::SCREEN_W, 18, TFT_BLACK);
+  g_canvas.fillRect(0, 0, app_config::SCREEN_W, 26, TFT_BLACK);
   g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
   g_canvas.setCursor(2, 2);
   g_canvas.printf(
@@ -798,8 +1020,12 @@ void draw_hud() {
       g_fps);
   g_canvas.setCursor(2, 10);
   g_canvas.printf(
-      "Block:%s  Pos:%d,%d,%d",
-      block_name(selected_block),
+      "%s  Block:%s",
+      kResolutionModes[g_resolution_mode_index].label,
+      block_name(selected_block));
+  g_canvas.setCursor(2, 18);
+  g_canvas.printf(
+      "Pos:%d,%d,%d",
       static_cast<int>(g_player.x),
       static_cast<int>(g_player.y),
       static_cast<int>(g_player.z));
@@ -834,7 +1060,7 @@ void draw_hud() {
   g_canvas.setCursor(18, 52);
   g_canvas.print("Z break  X place  C block");
   g_canvas.setCursor(18, 64);
-  g_canvas.print("R regen  BtnA help");
+  g_canvas.print("R regen  V resol  BtnA help");
 }
 
 void draw_frame() {
@@ -846,16 +1072,10 @@ void draw_frame() {
 }
 
 void setup_palette() {
-  for (int block = 0; block < BLOCK_COUNT; ++block) {
-    const uint16_t base = block_base_color(static_cast<uint8_t>(block));
-    g_block_shades[block][0] = shade_color(base, 1.00f);
-    g_block_shades[block][1] = shade_color(base, 0.84f);
-    g_block_shades[block][2] = shade_color(base, 0.65f);
-    g_block_shades[block][3] = shade_color(base, 0.45f);
-  }
+  build_block_textures();
 
-  for (int row = 0; row < app_config::LOWRES_H; ++row) {
-    const float t = static_cast<float>(row) / static_cast<float>(app_config::LOWRES_H - 1);
+  for (int row = 0; row < app_config::RENDER_H; ++row) {
+    const float t = static_cast<float>(row) / static_cast<float>(app_config::RENDER_H - 1);
     g_sky_colors[row] = lgfx::v1::color565(
         static_cast<uint8_t>(18 + 34 * (1.0f - t)),
         static_cast<uint8_t>(80 + 80 * (1.0f - t)),
@@ -867,17 +1087,17 @@ void setup_palette() {
   }
 
   const float v_fov = app_config::H_FOV_DEG *
-                      (static_cast<float>(app_config::LOWRES_H) / static_cast<float>(app_config::LOWRES_W));
+                      (static_cast<float>(app_config::RENDER_H) / static_cast<float>(app_config::RENDER_W));
   const float tan_half_h = tanf(app_config::H_FOV_DEG * DEG_TO_RAD * 0.5f);
   const float tan_half_v = tanf(v_fov * DEG_TO_RAD * 0.5f);
 
-  for (int x = 0; x < app_config::LOWRES_W; ++x) {
+  for (int x = 0; x < app_config::RENDER_W; ++x) {
     g_column_factor[x] =
-        (((static_cast<float>(x) + 0.5f) / app_config::LOWRES_W) - 0.5f) * 2.0f * tan_half_h;
+        (((static_cast<float>(x) + 0.5f) / app_config::RENDER_W) - 0.5f) * 2.0f * tan_half_h;
   }
-  for (int y = 0; y < app_config::LOWRES_H; ++y) {
+  for (int y = 0; y < app_config::RENDER_H; ++y) {
     g_row_factor[y] =
-        (0.5f - ((static_cast<float>(y) + 0.5f) / app_config::LOWRES_H)) * 2.0f * tan_half_v;
+        (0.5f - ((static_cast<float>(y) + 0.5f) / app_config::RENDER_H)) * 2.0f * tan_half_v;
   }
 }
 
@@ -893,6 +1113,7 @@ void setup() {
 
   g_canvas.setColorDepth(16);
   g_canvas.createSprite(app_config::SCREEN_W, app_config::SCREEN_H);
+  g_canvas.setSwapBytes(false);
   g_canvas.setTextFont(1);
   g_canvas.setTextSize(1);
 
