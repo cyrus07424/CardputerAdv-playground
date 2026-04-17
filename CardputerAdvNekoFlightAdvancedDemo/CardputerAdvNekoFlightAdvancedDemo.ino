@@ -1907,10 +1907,16 @@ void draw_enemy_direction_arrows(M5Canvas& canvas, const GameWorld& world) {
       continue;
     }
 
+    Vec3 screen;
     Vec3 rel;
     Vec3 local;
+    world.change3d(player, world.plane[i].pVel, screen);
     rel.setMinus(world.plane[i].pVel, player.pVel);
     player.change_w2l(rel, local);
+
+    if (screen.x >= 0.0 && screen.x < canvas.width() && screen.y >= 0.0 && screen.y < canvas.height()) {
+      continue;
+    }
 
     float dir_x = static_cast<float>(local.x);
     float dir_y = static_cast<float>(-local.z);
@@ -1996,7 +2002,7 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
       "ALT",
       TFT_GREENYELLOW);
 
-  if (world.chrome_visible && player.targetDis > 0.0) {
+  if (player.targetDis > 0.0) {
     const int16_t panel_x = canvas.width() - 60;
     const int16_t panel_y = 22;
     const int16_t panel_w = 36;
@@ -2052,7 +2058,9 @@ void update_controls() {
   g_world.control.boost = boost;
 
   if (reset && !g_prev_reset) {
+    const bool chrome_visible = g_world.chrome_visible;
     g_world.init();
+    g_world.chrome_visible = chrome_visible;
     g_needs_redraw = true;
   }
   g_prev_reset = reset;
