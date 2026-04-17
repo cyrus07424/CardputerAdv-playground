@@ -12,6 +12,9 @@ constexpr int16_t SCREEN_H = 135;
 constexpr int16_t RENDER_W = SCREEN_W;
 constexpr int16_t RENDER_H = SCREEN_H;
 constexpr uint8_t TEXTURE_SIZE = 8;
+constexpr uint8_t GRASS_TEXTURE_SIZE = 16;
+constexpr uint8_t FLOWER_TEXTURE_SIZE = 16;
+constexpr uint8_t FLOWER_VARIANT_COUNT = 3;
 
 constexpr int WORLD_W = 64;
 constexpr int WORLD_H = 24;
@@ -65,6 +68,8 @@ enum BlockType : uint8_t {
   BLOCK_SNOW,
   BLOCK_CLAY,
   BLOCK_RED_SAND,
+  BLOCK_TALL_GRASS,
+  BLOCK_FLOWER,
   BLOCK_COUNT
 };
 
@@ -99,6 +104,10 @@ struct RayHit {
   int axis;
   int face_sign;
   float distance;
+  bool billboard;
+  float tex_u;
+  float tex_v;
+  uint8_t variant;
 };
 
 struct PlayerState {
@@ -150,6 +159,11 @@ uint8_t g_world[app_config::WORLD_W][app_config::WORLD_H][app_config::WORLD_D];
 float g_column_factor[app_config::RENDER_W];
 float g_row_factor[app_config::RENDER_H];
 ColorRgb g_face_textures[BLOCK_COUNT][3][app_config::TEXTURE_SIZE * app_config::TEXTURE_SIZE];
+uint8_t g_plant_alpha[BLOCK_COUNT][app_config::TEXTURE_SIZE * app_config::TEXTURE_SIZE];
+ColorRgb g_grass_texture[app_config::GRASS_TEXTURE_SIZE * app_config::GRASS_TEXTURE_SIZE];
+uint8_t g_grass_alpha[app_config::GRASS_TEXTURE_SIZE * app_config::GRASS_TEXTURE_SIZE];
+ColorRgb g_flower_texture[app_config::FLOWER_VARIANT_COUNT][app_config::FLOWER_TEXTURE_SIZE * app_config::FLOWER_TEXTURE_SIZE];
+uint8_t g_flower_alpha[app_config::FLOWER_VARIANT_COUNT][app_config::FLOWER_TEXTURE_SIZE * app_config::FLOWER_TEXTURE_SIZE];
 uint16_t g_sky_colors[app_config::RENDER_H];
 uint16_t g_ground_colors[app_config::RENDER_H];
 uint16_t g_scanline[app_config::RENDER_W];
@@ -205,6 +219,8 @@ constexpr uint8_t kSelectableBlocks[] = {
     BLOCK_SNOW,
     BLOCK_CLAY,
     BLOCK_CACTUS,
+    BLOCK_TALL_GRASS,
+    BLOCK_FLOWER,
 };
 
 constexpr ResolutionMode kResolutionModes[] = {
@@ -340,7 +356,48 @@ void set_block(int x, int y, int z, uint8_t block) {
 }
 
 bool is_solid_block(uint8_t block) {
-  return block != BLOCK_AIR && block != BLOCK_WATER;
+  return block != BLOCK_AIR &&
+         block != BLOCK_WATER &&
+         block != BLOCK_TALL_GRASS &&
+         block != BLOCK_FLOWER;
+}
+
+bool is_plant_block(uint8_t block) {
+  return block == BLOCK_TALL_GRASS || block == BLOCK_FLOWER;
+}
+
+int billboard_texture_size(uint8_t block) {
+  if (block == BLOCK_TALL_GRASS) {
+    return app_config::GRASS_TEXTURE_SIZE;
+  }
+  if (block == BLOCK_FLOWER) {
+    return app_config::FLOWER_TEXTURE_SIZE;
+  }
+  return app_config::TEXTURE_SIZE;
+}
+
+uint8_t flower_variant_for_position(int x, int y, int z) {
+  return static_cast<uint8_t>(hash_coords(x, z, g_seed ^ (0xC0DEU + y * 97)) % app_config::FLOWER_VARIANT_COUNT);
+}
+
+uint8_t billboard_alpha_at(uint8_t block, int tex_x, int tex_y, uint8_t variant) {
+  if (block == BLOCK_TALL_GRASS) {
+    return g_grass_alpha[tex_y * app_config::GRASS_TEXTURE_SIZE + tex_x];
+  }
+  if (block == BLOCK_FLOWER) {
+    return g_flower_alpha[variant][tex_y * app_config::FLOWER_TEXTURE_SIZE + tex_x];
+  }
+  return g_plant_alpha[block][tex_y * app_config::TEXTURE_SIZE + tex_x];
+}
+
+ColorRgb billboard_color_at(uint8_t block, int tex_x, int tex_y, uint8_t variant) {
+  if (block == BLOCK_TALL_GRASS) {
+    return g_grass_texture[tex_y * app_config::GRASS_TEXTURE_SIZE + tex_x];
+  }
+  if (block == BLOCK_FLOWER) {
+    return g_flower_texture[variant][tex_y * app_config::FLOWER_TEXTURE_SIZE + tex_x];
+  }
+  return g_face_textures[block][1][tex_y * app_config::TEXTURE_SIZE + tex_x];
 }
 
 const char* block_name(uint8_t block) {
@@ -361,6 +418,8 @@ const char* block_name(uint8_t block) {
     case BLOCK_SNOW: return "Snow";
     case BLOCK_CLAY: return "Clay";
     case BLOCK_RED_SAND: return "RedSand";
+    case BLOCK_TALL_GRASS: return "TallGrass";
+    case BLOCK_FLOWER: return "Flower";
     default: return "Air";
   }
 }
@@ -403,6 +462,8 @@ ColorRgb block_base_color(uint8_t block) {
     case BLOCK_SNOW: return make_rgb(236, 242, 248);
     case BLOCK_CLAY: return make_rgb(144, 154, 168);
     case BLOCK_RED_SAND: return make_rgb(188, 112, 70);
+    case BLOCK_TALL_GRASS: return make_rgb(84, 174, 72);
+    case BLOCK_FLOWER: return make_rgb(220, 84, 132);
     default: return make_rgb(0, 0, 0);
   }
 }
@@ -424,6 +485,20 @@ uint8_t texture_noise(int block, int face, int x, int y) {
 
 void set_texture_texel(uint8_t block, uint8_t face, int x, int y, const ColorRgb& color) {
   g_face_textures[block][face][y * app_config::TEXTURE_SIZE + x] = color;
+}
+
+void set_plant_alpha(uint8_t block, int x, int y, uint8_t alpha) {
+  g_plant_alpha[block][y * app_config::TEXTURE_SIZE + x] = alpha;
+}
+
+void set_grass_texel(int x, int y, const ColorRgb& color, uint8_t alpha) {
+  g_grass_texture[y * app_config::GRASS_TEXTURE_SIZE + x] = color;
+  g_grass_alpha[y * app_config::GRASS_TEXTURE_SIZE + x] = alpha;
+}
+
+void set_flower_texel(uint8_t variant, int x, int y, const ColorRgb& color, uint8_t alpha) {
+  g_flower_texture[variant][y * app_config::FLOWER_TEXTURE_SIZE + x] = color;
+  g_flower_alpha[variant][y * app_config::FLOWER_TEXTURE_SIZE + x] = alpha;
 }
 
 void build_block_textures() {
@@ -450,6 +525,84 @@ void build_block_textures() {
   const ColorRgb clay = make_rgb(144, 154, 168);
   const ColorRgb clay_dark = make_rgb(118, 128, 144);
   const ColorRgb red_sand = make_rgb(188, 112, 70);
+  const ColorRgb grass_blade = make_rgb(84, 174, 72);
+  const ColorRgb grass_blade_dark = make_rgb(54, 128, 46);
+  const ColorRgb flower_petal = make_rgb(220, 84, 132);
+  const ColorRgb flower_center = make_rgb(248, 212, 84);
+  const ColorRgb flower_stem = make_rgb(68, 148, 58);
+  const ColorRgb flower_white = make_rgb(244, 242, 232);
+  const ColorRgb flower_blue = make_rgb(92, 146, 244);
+  const ColorRgb flower_red = make_rgb(224, 72, 72);
+  const ColorRgb flower_yellow = make_rgb(252, 208, 68);
+
+  for (int y = 0; y < app_config::GRASS_TEXTURE_SIZE; ++y) {
+    for (int x = 0; x < app_config::GRASS_TEXTURE_SIZE; ++x) {
+      const uint8_t noise = texture_noise(BLOCK_TALL_GRASS, FACE_TEXTURE_SIDE, x, y);
+      const bool blade =
+          ((x == 1 || x == 2) && y >= 9) ||
+          ((x == 4 || x == 5) && y >= 6) ||
+          ((x == 7 || x == 8) && y >= 3) ||
+          ((x == 10 || x == 11) && y >= 7) ||
+          ((x == 13 || x == 14) && y >= 10) ||
+          (x == 3 && y >= 11) ||
+          (x == 9 && y >= 12) ||
+          (x == 12 && y >= 5 && ((y + x) & 1) == 0);
+      uint8_t alpha = blade ? 255 : 0;
+      ColorRgb color = shade_rgb(
+          ((x + y) & 1) == 0 ? grass_blade : grass_blade_dark,
+          0.82f + (static_cast<float>(noise) / 255.0f) * 0.24f);
+      if (blade && ((x + y) % 5) == 0 && y > 3) {
+        alpha = 180;
+      }
+      set_grass_texel(x, y, color, alpha);
+    }
+  }
+
+  for (uint8_t variant = 0; variant < app_config::FLOWER_VARIANT_COUNT; ++variant) {
+    for (int y = 0; y < app_config::FLOWER_TEXTURE_SIZE; ++y) {
+      for (int x = 0; x < app_config::FLOWER_TEXTURE_SIZE; ++x) {
+        uint8_t alpha = 0;
+        ColorRgb color = flower_stem;
+        const bool stem = (x == 7 || x == 8) && y >= 7;
+        if (stem) {
+          alpha = 255;
+          color = shade_rgb(flower_stem, 0.90f);
+        } else if (variant == 0) {
+          const bool petal =
+              ((x >= 5 && x <= 10) && y >= 2 && y <= 5 && (y == 3 || y == 4)) ||
+              ((y >= 3 && y <= 8) && (x == 6 || x == 9)) ||
+              ((x == 7 || x == 8) && y >= 1 && y <= 8);
+          if (petal) {
+            alpha = 255;
+            color = ((x == 7 || x == 8) && y >= 4 && y <= 5)
+                        ? shade_rgb(flower_yellow, 0.96f)
+                        : shade_rgb(flower_white, 0.94f);
+          }
+        } else if (variant == 1) {
+          const bool petal =
+              ((x == 7 || x == 8) && y >= 1 && y <= 6) ||
+              ((y >= 2 && y <= 6) && (x == 6 || x == 9)) ||
+              ((y >= 3 && y <= 5) && (x == 5 || x == 10));
+          if (petal) {
+            alpha = 255;
+            color = y <= 2 ? shade_rgb(flower_red, 0.92f) : shade_rgb(flower_petal, 0.90f);
+          }
+        } else {
+          const bool petal =
+              ((x == 7 || x == 8) && y >= 1 && y <= 6) ||
+              ((x >= 5 && x <= 10) && y >= 3 && y <= 4) ||
+              ((x == 6 || x == 9) && y >= 2 && y <= 5);
+          if (petal) {
+            alpha = 255;
+            color = ((x == 7 || x == 8) && y >= 3 && y <= 4)
+                        ? shade_rgb(flower_yellow, 0.96f)
+                        : shade_rgb(flower_blue, 0.92f);
+          }
+        }
+        set_flower_texel(variant, x, y, color, alpha);
+      }
+    }
+  }
 
   for (int block = 0; block < BLOCK_COUNT; ++block) {
     for (int face = 0; face < 3; ++face) {
@@ -458,6 +611,7 @@ void build_block_textures() {
           const uint8_t noise = texture_noise(block, face, x, y);
           const float noise_factor = 0.82f + (static_cast<float>(noise) / 255.0f) * 0.30f;
           ColorRgb color = shade_rgb(block_base_color(static_cast<uint8_t>(block)), noise_factor);
+          uint8_t alpha = 255;
 
           switch (block) {
             case BLOCK_GRASS:
@@ -564,11 +718,42 @@ void build_block_textures() {
             case BLOCK_RED_SAND:
               color = shade_rgb(red_sand, 0.82f + (static_cast<float>((noise + y * 11) & 0xFFU) / 255.0f) * 0.22f);
               break;
+            case BLOCK_TALL_GRASS: {
+              alpha = 0;
+              const bool blade =
+                  ((x == 1 || x == 2) && y >= 3) ||
+                  ((x == 3 || x == 4) && y >= 1) ||
+                  ((x == 5 || x == 6) && y >= 4) ||
+                  (x == 2 && y == 2) ||
+                  (x == 4 && y == 0);
+              if (blade) {
+                alpha = 255;
+                color = shade_rgb(((x + y) & 1) == 0 ? grass_blade : grass_blade_dark, 0.88f + (noise_factor - 0.82f) * 0.3f);
+              }
+              break;
+            }
+            case BLOCK_FLOWER: {
+              alpha = 0;
+              const bool stem = (x == 3 || x == 4) && y >= 3;
+              const bool petal =
+                  (y >= 1 && y <= 3) &&
+                  ((x >= 2 && x <= 5 && y == 2) ||
+                   ((x == 3 || x == 4) && (y == 1 || y == 3)));
+              if (stem) {
+                alpha = 255;
+                color = shade_rgb(flower_stem, 0.90f);
+              } else if (petal) {
+                alpha = 255;
+                color = (x == 3 || x == 4) && y == 2 ? shade_rgb(flower_center, 0.96f) : shade_rgb(flower_petal, 0.92f);
+              }
+              break;
+            }
             default:
               break;
           }
 
           set_texture_texel(static_cast<uint8_t>(block), static_cast<uint8_t>(face), x, y, color);
+          set_plant_alpha(static_cast<uint8_t>(block), x, y, alpha);
         }
       }
     }
@@ -578,7 +763,7 @@ void build_block_textures() {
 int top_solid_y(int x, int z) {
   for (int y = app_config::WORLD_H - 1; y >= 0; --y) {
     const uint8_t block = get_block(x, y, z);
-    if (block != BLOCK_AIR && block != BLOCK_WATER) {
+    if (block != BLOCK_AIR && block != BLOCK_WATER && !is_plant_block(block)) {
       return y;
     }
   }
@@ -811,6 +996,16 @@ void reset_world() {
             (biome == BIOME_PLAINS && roll < 6U) ||
             (biome == BIOME_WETLAND && roll < 4U)) {
           place_tree(x, y, z);
+        } else if (get_block(x, y + 1, z) == BLOCK_AIR) {
+          const uint8_t flora_roll = static_cast<uint8_t>(hash_coords(x, z, g_seed ^ 0x9191U) % 48U);
+          const uint8_t flower_roll = static_cast<uint8_t>(hash_coords(x, z, g_seed ^ 0xA1B2U) % 240U);
+          if (flower_roll == 0U) {
+            set_block(x, y + 1, z, BLOCK_FLOWER);
+          } else if ((biome == BIOME_PLAINS && flora_roll < 3U) ||
+                     (biome == BIOME_FOREST && flora_roll < 5U) ||
+                     (biome == BIOME_WETLAND && flora_roll < 6U)) {
+            set_block(x, y + 1, z, BLOCK_TALL_GRASS);
+          }
         }
       } else if (top_block == BLOCK_SNOW) {
         if ((hash_coords(x, z, g_seed ^ 0x3131U) & 0xFFU) < 14U) {
@@ -980,6 +1175,10 @@ bool collides_aabb(float center_x, float feet_y, float center_z) {
   return false;
 }
 
+bool player_grounded_probe() {
+  return collides_aabb(g_player.x, g_player.y - 0.06f, g_player.z);
+}
+
 void try_move_horizontal(float dx, float dz) {
   if (g_player.fly_mode) {
     g_player.x = clampf(g_player.x + dx, 1.1f, app_config::WORLD_W - 1.1f);
@@ -1042,9 +1241,85 @@ Vec3 forward_vector() {
   return camera_forward();
 }
 
+bool plant_billboard_hit(
+    uint8_t block,
+    int cell_x,
+    int cell_y,
+    int cell_z,
+    const Vec3& origin,
+    const Vec3& dir,
+    float t_min,
+    float t_max,
+    RayHit& hit) {
+  const uint8_t variant = block == BLOCK_FLOWER ? flower_variant_for_position(cell_x, cell_y, cell_z) : 0;
+  const float local_x0 = origin.x - static_cast<float>(cell_x);
+  const float local_y0 = origin.y - static_cast<float>(cell_y);
+  const float local_z0 = origin.z - static_cast<float>(cell_z);
+  float best_t = t_max + 1.0f;
+  float best_u = 0.0f;
+  float best_v = 0.0f;
+  bool found = false;
+
+  auto try_plane = [&](float numerator, float denominator, bool reverse_u) {
+    if (fabsf(denominator) < 0.00001f) {
+      return;
+    }
+    const float t = numerator / denominator;
+    if (t < t_min || t > t_max || t >= best_t) {
+      return;
+    }
+
+    const float lx = local_x0 + dir.x * t;
+    const float ly = local_y0 + dir.y * t;
+    const float lz = local_z0 + dir.z * t;
+    if (lx < 0.0f || lx > 1.0f || lz < 0.0f || lz > 1.0f || ly < 0.0f || ly > 1.0f) {
+      return;
+    }
+
+    const float u = reverse_u ? (1.0f - lx) : lx;
+    const float v = 1.0f - ly;
+    const int texture_size = billboard_texture_size(block);
+    const int tex_x =
+        static_cast<int>(clampf(u * texture_size, 0.0f, texture_size - 1.0f));
+    const int tex_y =
+        static_cast<int>(clampf(v * texture_size, 0.0f, texture_size - 1.0f));
+    if (billboard_alpha_at(block, tex_x, tex_y, variant) < 128U) {
+      return;
+    }
+
+    best_t = t;
+    best_u = u;
+    best_v = v;
+    found = true;
+  };
+
+  try_plane(local_x0 - local_z0, dir.z - dir.x, false);
+  try_plane(1.0f - local_x0 - local_z0, dir.x + dir.z, true);
+
+  if (!found) {
+    return false;
+  }
+
+  hit.hit = true;
+  hit.block = block;
+  hit.x = cell_x;
+  hit.y = cell_y;
+  hit.z = cell_z;
+  hit.axis = 2;
+  hit.face_sign = 1;
+  hit.distance = best_t;
+  hit.billboard = true;
+  hit.tex_u = best_u;
+  hit.tex_v = best_v;
+  hit.variant = variant;
+  return true;
+}
+
 RayHit cast_ray(const Vec3& origin, const Vec3& dir, float max_distance) {
   RayHit hit = {};
   hit.hit = false;
+  hit.billboard = false;
+  hit.variant = 0;
 
   int map_x = static_cast<int>(floorf(origin.x));
   int map_y = static_cast<int>(floorf(origin.y));
@@ -1101,6 +1376,16 @@ RayHit cast_ray(const Vec3& origin, const Vec3& dir, float max_distance) {
 
     const uint8_t block = get_block(map_x, map_y, map_z);
     if (block != BLOCK_AIR) {
+      if (is_plant_block(block)) {
+        const float exit_distance = min(side_x, min(side_y, side_z));
+        if (plant_billboard_hit(block, map_x, map_y, map_z, origin, dir, distance, exit_distance, hit)) {
+          hit.prev_x = prev_x;
+          hit.prev_y = prev_y;
+          hit.prev_z = prev_z;
+          return hit;
+        }
+        continue;
+      }
       hit.hit = true;
       hit.block = block;
       hit.x = map_x;
@@ -1112,6 +1397,8 @@ RayHit cast_ray(const Vec3& origin, const Vec3& dir, float max_distance) {
       hit.axis = axis;
       hit.face_sign = face_sign;
       hit.distance = distance;
+      hit.billboard = false;
+      hit.variant = 0;
       return hit;
     }
   }
@@ -1402,6 +1689,19 @@ void break_target_block() {
   set_block(g_target.x, g_target.y, g_target.z, BLOCK_AIR);
 }
 
+bool can_place_plant_at(int x, int y, int z) {
+  if (!in_world(x, y, z) || get_block(x, y, z) != BLOCK_AIR) {
+    return false;
+  }
+  if (!in_world(x, y - 1, z)) {
+    return false;
+  }
+  const uint8_t support = get_block(x, y - 1, z);
+  return support != BLOCK_AIR &&
+         support != BLOCK_WATER &&
+         !is_plant_block(support);
+}
+
 void place_selected_block() {
   if (!g_target.hit) {
     return;
@@ -1414,6 +1714,11 @@ void place_selected_block() {
   }
 
   const uint8_t block = kSelectableBlocks[g_player.selected_slot];
+  if (is_plant_block(block)) {
+    if (g_target.prev_y != g_target.y + 1 || !can_place_plant_at(g_target.prev_x, g_target.prev_y, g_target.prev_z)) {
+      return;
+    }
+  }
   set_block(g_target.prev_x, g_target.prev_y, g_target.prev_z, block);
   if (!g_player.fly_mode && collides_aabb(g_player.x, g_player.y, g_player.z)) {
     set_block(g_target.prev_x, g_target.prev_y, g_target.prev_z, BLOCK_AIR);
@@ -1589,9 +1894,11 @@ void update_game(float dt) {
     }
     g_player.y = clampf(g_player.y + vertical * app_config::FLY_SPEED * dt, 1.0f, app_config::WORLD_H - 2.0f);
   } else {
-    if (jump_key && !g_prev_jump && g_player.on_ground) {
+    if (jump_key && !g_prev_jump && (g_player.on_ground || player_grounded_probe())) {
       g_player.velocity_y = app_config::JUMP_VELOCITY;
+      g_player.y += 0.04f;
       g_player.on_ground = false;
+      request_low_res_redraw();
     }
   }
   g_prev_jump = jump_key;
@@ -1644,25 +1951,29 @@ uint8_t face_texture_group_for_hit(const RayHit& hit) {
 
 uint16_t voxel_color_for_hit(const RayHit& hit, const Vec3& origin, const Vec3& dir) {
   const Vec3 impact = add_vec3(origin, scale_vec3(dir, hit.distance));
-  float u = 0.0f;
-  float v = 0.0f;
+  float u = hit.tex_u;
+  float v = hit.tex_v;
 
-  if (hit.axis == 0) {
-    u = hit.face_sign > 0 ? 1.0f - fracf_positive(impact.z) : fracf_positive(impact.z);
-    v = 1.0f - fracf_positive(impact.y);
-  } else if (hit.axis == 1) {
-    u = fracf_positive(impact.x);
-    v = hit.face_sign > 0 ? fracf_positive(impact.z) : 1.0f - fracf_positive(impact.z);
-  } else {
-    u = hit.face_sign > 0 ? fracf_positive(impact.x) : 1.0f - fracf_positive(impact.x);
-    v = 1.0f - fracf_positive(impact.y);
+  if (!hit.billboard) {
+    if (hit.axis == 0) {
+      u = hit.face_sign > 0 ? 1.0f - fracf_positive(impact.z) : fracf_positive(impact.z);
+      v = 1.0f - fracf_positive(impact.y);
+    } else if (hit.axis == 1) {
+      u = fracf_positive(impact.x);
+      v = hit.face_sign > 0 ? fracf_positive(impact.z) : 1.0f - fracf_positive(impact.z);
+    } else {
+      u = hit.face_sign > 0 ? fracf_positive(impact.x) : 1.0f - fracf_positive(impact.x);
+      v = 1.0f - fracf_positive(impact.y);
+    }
   }
 
-  const int tex_x = static_cast<int>(clampf(u * app_config::TEXTURE_SIZE, 0.0f, app_config::TEXTURE_SIZE - 1.0f));
-  const int tex_y = static_cast<int>(clampf(v * app_config::TEXTURE_SIZE, 0.0f, app_config::TEXTURE_SIZE - 1.0f));
-  const uint8_t face_group = face_texture_group_for_hit(hit);
-  const ColorRgb texel =
-      g_face_textures[hit.block][face_group][tex_y * app_config::TEXTURE_SIZE + tex_x];
+  const int texture_size = hit.billboard ? billboard_texture_size(hit.block) : app_config::TEXTURE_SIZE;
+  const int tex_x = static_cast<int>(clampf(u * texture_size, 0.0f, texture_size - 1.0f));
+  const int tex_y = static_cast<int>(clampf(v * texture_size, 0.0f, texture_size - 1.0f));
+  const uint8_t face_group = hit.billboard ? FACE_TEXTURE_SIDE : face_texture_group_for_hit(hit);
+  const ColorRgb texel = hit.billboard
+                             ? billboard_color_at(hit.block, tex_x, tex_y, hit.variant)
+                             : g_face_textures[hit.block][face_group][tex_y * app_config::TEXTURE_SIZE + tex_x];
 
   float light = 0.82f;
   if (face_group == FACE_TEXTURE_TOP) {
