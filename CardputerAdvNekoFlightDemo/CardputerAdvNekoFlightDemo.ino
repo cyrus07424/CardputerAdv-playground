@@ -4,7 +4,7 @@
 
 namespace app_config {
 constexpr double FMAX = 10000.0;
-constexpr int GSCALE = 16;
+constexpr int GSCALE = 32;
 constexpr int PMAX = 4;
 constexpr double G = -9.8;
 constexpr double DT = 0.1;
@@ -1744,7 +1744,7 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
 
   canvas.setTextColor(player.gunTemp > Plane::MAXT * 3 / 4 ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
   canvas.setCursor(0, app_config::FOOTER_Y);
-  canvas.printf("BtnA/Space fire  Enter auto  B boost  GUN %02d", player.gunTemp);
+  canvas.printf("A fire  Enter auto  S boost  GUN %02d", player.gunTemp);
 }
 
 void GameWorld::draw(M5Canvas& canvas) {
@@ -1762,8 +1762,8 @@ void update_controls() {
   const bool down = contains_char_key(status, '.');
   const bool left = contains_char_key(status, ',');
   const bool right = contains_char_key(status, '/');
-  const bool shoot = M5Cardputer.BtnA.isPressed() || status.space || contains_char_key(status, ' ');
-  const bool boost = contains_char_key(status, 'b') || contains_char_key(status, 'B');
+  const bool shoot = contains_char_key(status, 'a') || contains_char_key(status, 'A');
+  const bool boost = contains_char_key(status, 's') || contains_char_key(status, 'S');
   const bool toggle_auto = status.enter;
 
   g_world.control.up = up;
