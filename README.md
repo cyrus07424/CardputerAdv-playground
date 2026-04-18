@@ -8,7 +8,7 @@ Cardputer-ADV 向けの Arduino デモ集です。Arduino IDE で開いてその
 | --- | --- | --- |
 | `CardputerAdvKeyboardInputDemo` | 日本語 IME 風変換入力と SD 保存 / 読込に対応したテキストエディター | `M5Cardputer`, `SD`, `SPI` |
 | `CardputerAdvMandelbrotDemo` | マンデルブロ集合の描画とキーボード操作によるパン / ズーム | `M5Cardputer` |
-| `CardputerAdvRouletteRecorderDemo` | ルーレットの出目をセッション単位で記録・分析するツール | `M5Cardputer`, `SD`, `SPI`, `Sqlite3Esp32` |
+| `CardputerAdvRouletteRecorderDemo` | ルーレットの出目をセッション単位で CSV 記録し、ヒートマップや履歴で可視化するツール | `M5Cardputer`, `SD`, `SPI` |
 | `CardputerAdvMinecraftDemo` | `Minecraft` 風デモ | `M5Cardputer` |
 | `CardputerAdvOutRunDemo` | `OutRun` 風デモ | `M5Cardputer` |
 | `CardputerAdvIkachanDemo` | `Ikachan` 風デモ | `M5Cardputer` |
