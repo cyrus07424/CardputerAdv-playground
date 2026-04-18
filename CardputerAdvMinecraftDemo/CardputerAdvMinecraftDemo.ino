@@ -40,7 +40,8 @@ constexpr float RAY_MAX_DISTANCE = 30.0f;
 constexpr float TARGET_MAX_DISTANCE = 6.5f;
 constexpr int MAX_RAY_STEPS = 72;
 constexpr uint32_t INITIAL_SEED = 1337U;
-constexpr char WORLD_SAVE_PATH[] = "/minecraft/world.bin";
+constexpr char WORLD_SAVE_DIR[] = "/mcadv";
+constexpr char WORLD_SAVE_PATH[] = "/mcadv/world.bin";
 }  // namespace app_config
 
 namespace board_pins {
@@ -154,6 +155,12 @@ struct InputLatch {
   bool menu_right = false;
 };
 
+enum class PendingStorageAction : uint8_t {
+  None = 0,
+  Save,
+  Load,
+};
+
 M5Canvas g_canvas(&M5Cardputer.Display);
 uint8_t g_world[app_config::WORLD_W][app_config::WORLD_H][app_config::WORLD_D];
 float g_column_factor[app_config::RENDER_W];
@@ -188,6 +195,7 @@ InputLatch g_latched_input;
 bool g_sd_ready = false;
 String g_menu_status = "SD init pending";
 uint32_t g_last_sd_check_ms = 0;
+PendingStorageAction g_pending_storage_action = PendingStorageAction::None;
 
 bool g_prev_break = false;
 bool g_prev_place = false;
@@ -1548,9 +1556,6 @@ void init_spi_bus() {
 }
 
 bool init_sd_card() {
-  SD.end();
-  delay(5);
-  SPI.begin(board_pins::SD_SCK, board_pins::SD_MISO, board_pins::SD_MOSI, board_pins::SD_CS);
   if (!SD.begin(board_pins::SD_CS, SPI, 25000000)) {
     g_sd_ready = false;
     g_menu_status = "SD init failed";
@@ -1578,18 +1583,46 @@ bool ensure_sd_card(bool force = false) {
   return init_sd_card();
 }
 
+File open_world_save_for_write() {
+  SD.remove(app_config::WORLD_SAVE_PATH);
+  return SD.open(app_config::WORLD_SAVE_PATH, FILE_APPEND);
+}
+
+File open_world_save_for_read() {
+  return SD.open(app_config::WORLD_SAVE_PATH, FILE_READ);
+}
+
+bool ensure_world_save_directory() {
+  File dir = SD.open(app_config::WORLD_SAVE_DIR, FILE_READ);
+  if (dir) {
+    const bool is_dir = dir.isDirectory();
+    dir.close();
+    if (is_dir) {
+      return true;
+    }
+  }
+  if (SD.exists(app_config::WORLD_SAVE_DIR)) {
+    g_menu_status = "save dir blocked";
+    return false;
+  }
+  if (!SD.mkdir(app_config::WORLD_SAVE_DIR)) {
+    g_menu_status = "mkdir failed";
+    return false;
+  }
+  return true;
+}
+
 bool save_world_to_sd() {
   if (!ensure_sd_card(true)) {
     return false;
   }
-  if (!SD.exists("/minecraft") && !SD.mkdir("/minecraft")) {
-    g_menu_status = "mkdir failed";
+  if (!ensure_world_save_directory()) {
+    g_sd_ready = false;
     return false;
   }
-
-  SD.remove(app_config::WORLD_SAVE_PATH);
-  File file = SD.open(app_config::WORLD_SAVE_PATH, FILE_WRITE);
+  File file = open_world_save_for_write();
   if (!file) {
+    g_sd_ready = false;
     g_menu_status = "open save failed";
     return false;
   }
@@ -1619,6 +1652,9 @@ bool save_world_to_sd() {
       file.write(reinterpret_cast<const uint8_t*>(g_world), sizeof(g_world)) == sizeof(g_world);
   file.close();
 
+  if (!ok) {
+    g_sd_ready = false;
+  }
   g_menu_status = ok ? "World saved" : "Save failed";
   return ok;
 }
@@ -1628,7 +1664,7 @@ bool load_world_from_sd() {
     return false;
   }
 
-  File file = SD.open(app_config::WORLD_SAVE_PATH, FILE_READ);
+  File file = open_world_save_for_read();
   if (!file) {
     g_menu_status = "No save file";
     return false;
@@ -1762,11 +1798,30 @@ void update_game(float dt) {
 
   if (toggle_menu && !g_prev_fn) {
     g_menu_visible = !g_menu_visible;
+    if (g_menu_visible && !g_sd_ready) {
+      ensure_sd_card(true);
+    }
     request_low_res_redraw();
   }
   g_prev_fn = toggle_menu;
 
   if (g_menu_visible) {
+    if (g_pending_storage_action != PendingStorageAction::None) {
+      const PendingStorageAction action = g_pending_storage_action;
+      g_pending_storage_action = PendingStorageAction::None;
+      if (action == PendingStorageAction::Save) {
+        save_world_to_sd();
+      } else {
+        load_world_from_sd();
+      }
+      request_low_res_redraw();
+      g_prev_menu_up = menu_up;
+      g_prev_menu_down = menu_down;
+      g_prev_menu_left = menu_left;
+      g_prev_menu_right = menu_right;
+      return;
+    }
+
     if (menu_up && !g_prev_menu_up) {
       g_menu_index = (g_menu_index + 5 - 1) % 5;
     }
@@ -1783,9 +1838,13 @@ void update_game(float dt) {
         update_environment_palette();
         request_low_res_redraw();
       } else if (g_menu_index == 3) {
-        save_world_to_sd();
+        g_menu_status = "Saving...";
+        g_pending_storage_action = PendingStorageAction::Save;
+        request_low_res_redraw();
       } else {
-        load_world_from_sd();
+        g_menu_status = "Loading...";
+        g_pending_storage_action = PendingStorageAction::Load;
+        request_low_res_redraw();
       }
     }
     if (menu_right && !g_prev_menu_right) {
@@ -1798,9 +1857,13 @@ void update_game(float dt) {
         update_environment_palette();
         request_low_res_redraw();
       } else if (g_menu_index == 3) {
-        save_world_to_sd();
+        g_menu_status = "Saving...";
+        g_pending_storage_action = PendingStorageAction::Save;
+        request_low_res_redraw();
       } else {
-        load_world_from_sd();
+        g_menu_status = "Loading...";
+        g_pending_storage_action = PendingStorageAction::Load;
+        request_low_res_redraw();
       }
     }
     g_prev_menu_up = menu_up;
@@ -2244,7 +2307,6 @@ void setup() {
   g_canvas.setTextSize(1);
 
   init_spi_bus();
-  ensure_sd_card(true);
   setup_palette();
   g_seed = random_world_seed();
   reset_world();
@@ -2260,7 +2322,6 @@ void setup() {
 
 void loop() {
   M5Cardputer.update();
-  ensure_sd_card();
 
   const uint32_t now = millis();
   float dt = static_cast<float>(now - g_last_tick_ms) / 1000.0f;
