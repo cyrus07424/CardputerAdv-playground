@@ -1,0 +1,38 @@
+# CardputerAdvOutRunDemo
+
+`ZgzInfinity/OutRun` のゲーム感を参考に、Cardputer-ADV 向けへ**クリーンルーム再実装**した pseudo-3D ドライブデモです。
+
+元リポジトリは GPLv3 のため、このデモではコードやアセットを持ち込まず、Cardputer-ADV の 240x135 画面に合わせて描画・入力・ゲーム進行を作り直しています。
+
+## 必要なライブラリ
+
+- M5Cardputer
+
+## Arduino IDE 設定
+
+- 開くファイル: `CardputerAdvOutRunDemo.ino`
+- ボード: `m5stack:esp32:m5stack_cardputer`
+
+## 操作
+
+1. `;` / `A` でアクセル
+2. `.` でブレーキ
+3. `,` で左へステア
+4. `/` で右へステア
+5. タイトル / リザルト画面では、上記の**いずれかの運転キー**または `Enter` / `BtnA` でスタート / リトライ
+6. 走行中の `Enter` で `AUTO / MANUAL` を切り替え
+
+## 内容
+
+- 曲線・起伏つきの pseudo-3D ロード描画
+- traffic car との追い越し / 衝突
+- `AUTO` では中央維持を強め、一般車を避けながら走行
+- 速度・ギア・残り時間・残距離を表示する簡易 HUD
+- タイトル、走行、クラッシュ、ゲームオーバー、クリアの状態遷移
+- 外部画像や音声に依存しない手描き / 手続き生成ベースの演出
+
+## メモ
+
+- GPLv3 の upstream 実装やアセットは取り込んでいません
+- OutRun 風の雰囲気を Cardputer-ADV 向けに絞った軽量版です
+- `AUTO` 中は衝突判定を切っているためクラッシュしません
