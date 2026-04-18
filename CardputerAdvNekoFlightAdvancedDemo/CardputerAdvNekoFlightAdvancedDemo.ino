@@ -16,6 +16,8 @@ constexpr int16_t HUD_HEIGHT = 18;
 constexpr int16_t FOOTER_Y = 124;
 constexpr int16_t RETICLE_RADIUS = 8;
 constexpr double CAMERA_SCALE = 42.0;
+constexpr bool SHOW_AAM_LABEL = false;
+constexpr bool SHOW_GUN_HEAT_LABEL = false;
 }
 
 struct Vec3 {
@@ -311,6 +313,8 @@ class GameWorld {
   bool ui_speed_visible;
   bool ui_altitude_visible;
   bool ui_tgt_visible;
+  bool ui_aam_ammo_visible;
+  bool ui_gun_heat_visible;
   bool ui_header_visible;
   bool ui_mode_banner_visible;
   bool ui_footer_visible;
@@ -381,6 +385,8 @@ void reset_stage_preserve_ui(GameWorld& world) {
   const bool ui_speed_visible = world.ui_speed_visible;
   const bool ui_altitude_visible = world.ui_altitude_visible;
   const bool ui_tgt_visible = world.ui_tgt_visible;
+  const bool ui_aam_ammo_visible = world.ui_aam_ammo_visible;
+  const bool ui_gun_heat_visible = world.ui_gun_heat_visible;
   const bool ui_header_visible = world.ui_header_visible;
   const bool ui_mode_banner_visible = world.ui_mode_banner_visible;
   const bool ui_footer_visible = world.ui_footer_visible;
@@ -398,6 +404,8 @@ void reset_stage_preserve_ui(GameWorld& world) {
   world.ui_speed_visible = ui_speed_visible;
   world.ui_altitude_visible = ui_altitude_visible;
   world.ui_tgt_visible = ui_tgt_visible;
+  world.ui_aam_ammo_visible = ui_aam_ammo_visible;
+  world.ui_gun_heat_visible = ui_gun_heat_visible;
   world.ui_header_visible = ui_header_visible;
   world.ui_mode_banner_visible = ui_mode_banner_visible;
   world.ui_footer_visible = ui_footer_visible;
@@ -500,6 +508,8 @@ GameWorld::GameWorld()
       ui_speed_visible(true),
       ui_altitude_visible(true),
       ui_tgt_visible(true),
+      ui_aam_ammo_visible(true),
+      ui_gun_heat_visible(true),
       ui_header_visible(true),
       ui_mode_banner_visible(true),
       ui_footer_visible(true),
@@ -1859,7 +1869,7 @@ void draw_mode_banner(M5Canvas& canvas, bool auto_flight) {
   canvas.print(auto_flight ? "AUTO" : "MANUAL");
 }
 
-constexpr int kUiMenuItemCount = 10;
+constexpr int kUiMenuItemCount = 12;
 constexpr int kUiMenuVisibleRows = 9;
 
 const char* ui_menu_label(int index) {
@@ -1879,10 +1889,14 @@ const char* ui_menu_label(int index) {
     case 6:
       return "TGT Panel";
     case 7:
-      return "Header";
+      return "AAM Ammo";
     case 8:
-      return "Mode Banner";
+      return "Gun Heat";
     case 9:
+      return "Header";
+    case 10:
+      return "Mode Banner";
+    case 11:
       return "Footer";
     default:
       return "";
@@ -1906,10 +1920,14 @@ bool ui_menu_value(const GameWorld& world, int index) {
     case 6:
       return world.ui_tgt_visible;
     case 7:
-      return world.ui_header_visible;
+      return world.ui_aam_ammo_visible;
     case 8:
-      return world.ui_mode_banner_visible;
+      return world.ui_gun_heat_visible;
     case 9:
+      return world.ui_header_visible;
+    case 10:
+      return world.ui_mode_banner_visible;
+    case 11:
       return world.ui_footer_visible;
     default:
       return false;
@@ -1940,12 +1958,18 @@ void toggle_ui_menu_value(GameWorld& world, int index) {
       world.ui_tgt_visible = !world.ui_tgt_visible;
       break;
     case 7:
-      world.ui_header_visible = !world.ui_header_visible;
+      world.ui_aam_ammo_visible = !world.ui_aam_ammo_visible;
       break;
     case 8:
-      world.ui_mode_banner_visible = !world.ui_mode_banner_visible;
+      world.ui_gun_heat_visible = !world.ui_gun_heat_visible;
       break;
     case 9:
+      world.ui_header_visible = !world.ui_header_visible;
+      break;
+    case 10:
+      world.ui_mode_banner_visible = !world.ui_mode_banner_visible;
+      break;
+    case 11:
       world.ui_footer_visible = !world.ui_footer_visible;
       break;
   }
@@ -2172,7 +2196,6 @@ void draw_reticle(
   const int cx = app_config::SCREEN_W / 2;
   const int cy = 70;
   if (show_reticle) {
-    canvas.drawCircle(cx, cy, 3, TFT_DARKGREY);
     canvas.drawFastHLine(cx - 6, cy, 12, TFT_DARKGREY);
     canvas.drawFastVLine(cx, cy - 6, 12, TFT_DARKGREY);
 
@@ -2187,6 +2210,76 @@ void draw_reticle(
 
   if (show_lock_box && player.targetSx > -1000) {
     canvas.drawRect(player.targetSx - 6, player.targetSy - 6, 12, 12, TFT_RED);
+  }
+}
+
+int count_remaining_missiles(const Plane& player) {
+  int remaining = 0;
+  for (int i = 0; i < Plane::MMMAX; ++i) {
+    if (player.aam[i].use < 0) {
+      ++remaining;
+    }
+  }
+  return remaining;
+}
+
+void draw_missile_ammo_hud(M5Canvas& canvas, const Plane& player) {
+  char ammo_text[12];
+  snprintf(ammo_text, sizeof(ammo_text), "%02d/%02d", count_remaining_missiles(player), Plane::MMMAX);
+  canvas.setTextFont(0);
+  canvas.setTextSize(1);
+  canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
+  if constexpr (app_config::SHOW_AAM_LABEL) {
+    canvas.setCursor(canvas.width() / 2 - canvas.textWidth("AAM") / 2, canvas.height() - 30);
+    canvas.print("AAM");
+    canvas.setCursor(canvas.width() / 2 - canvas.textWidth(ammo_text) / 2, canvas.height() - 20);
+    canvas.print(ammo_text);
+  } else {
+    canvas.setCursor(canvas.width() / 2 - canvas.textWidth(ammo_text) / 2, canvas.height() - 30);
+    canvas.print(ammo_text);
+  }
+  canvas.setTextFont(1);
+}
+
+void draw_gun_heat_bar(M5Canvas& canvas, const Plane& player) {
+  const int16_t bar_w = 32;
+  const int16_t bar_h = 3;
+  const int16_t bar_x = canvas.width() / 2 - bar_w / 2;
+  const int16_t bar_y = canvas.height() - 35;
+  int16_t fill_w = static_cast<int16_t>(
+      (static_cast<float>(player.gunTemp) / static_cast<float>(Plane::MAXT)) * static_cast<float>(bar_w - 2));
+  if (fill_w < 0) {
+    fill_w = 0;
+  }
+  if (fill_w > bar_w - 2) {
+    fill_w = bar_w - 2;
+  }
+
+  const float heat_ratio = static_cast<float>(player.gunTemp) / static_cast<float>(Plane::MAXT);
+  uint16_t heat_color = TFT_RED;
+  if (player.heatWait) {
+    heat_color = TFT_RED;
+  } else if (heat_ratio < 0.4f) {
+    heat_color = TFT_CYAN;
+  } else if (heat_ratio < 0.7f) {
+    heat_color = TFT_GREENYELLOW;
+  } else if (heat_ratio < 0.9f) {
+    heat_color = TFT_ORANGE;
+  }
+
+  canvas.fillRect(bar_x, bar_y, bar_w, bar_h, TFT_BLACK);
+  canvas.drawRect(bar_x, bar_y, bar_w, bar_h, heat_color);
+  if (fill_w > 0) {
+    canvas.fillRect(bar_x + 1, bar_y + 1, fill_w, max<int16_t>(1, bar_h - 1), heat_color);
+  }
+
+  if constexpr (app_config::SHOW_GUN_HEAT_LABEL) {
+    canvas.setTextFont(0);
+    canvas.setTextSize(1);
+    canvas.setTextColor(heat_color, TFT_BLACK);
+    canvas.setCursor(canvas.width() / 2 - canvas.textWidth("GUN") / 2, bar_y - 10);
+    canvas.print("GUN");
+    canvas.setTextFont(1);
   }
 }
 
@@ -2246,10 +2339,17 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
     canvas.printf("%4d", static_cast<int>(player.targetDis));
   }
 
+  if (world.ui_aam_ammo_visible) {
+    draw_missile_ammo_hud(canvas, player);
+  }
+  if (world.ui_gun_heat_visible) {
+    draw_gun_heat_bar(canvas, player);
+  }
+
   if (world.chrome_visible && world.ui_footer_visible) {
-    canvas.setTextColor(player.gunTemp > Plane::MAXT * 3 / 4 ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
     canvas.setCursor(0, app_config::FOOTER_Y);
-    canvas.printf("A:Fire S:Boost R:Reset Ent:Auto / Gun:%02d", player.gunTemp);
+    canvas.print("A:Fire S:Boost R:Reset Ent:Auto fn:UI");
   }
 }
 
