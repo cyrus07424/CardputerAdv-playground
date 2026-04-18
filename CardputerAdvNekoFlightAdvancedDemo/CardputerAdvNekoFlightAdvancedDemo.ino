@@ -3,12 +3,11 @@
 #include <math.h>
 
 namespace app_config {
-constexpr double FMAX = 10000.0;
+constexpr double FMAX = 50000.0;
 constexpr int GSCALE = 32;
 constexpr int PMAX = 4;
 constexpr double G = -9.8;
 constexpr double DT = 0.1;
-constexpr double RUDDER_DEFLECTION_DEG = 10.0;
 constexpr uint32_t FRAME_INTERVAL_MS = 33;
 constexpr int SCREEN_W = 240;
 constexpr int SCREEN_H = 135;
@@ -282,8 +281,6 @@ struct ControlState {
   bool right = false;
   bool up = false;
   bool down = false;
-  bool rudder_left = false;
-  bool rudder_right = false;
   bool boost = false;
 };
 
@@ -907,15 +904,6 @@ void Plane::keyScan(GameWorld& world) {
   if (world.control.right) {
     stickVel.y = 1.0;
   }
-  if (world.control.rudder_left) {
-    stickVel.z = -1.0;
-  }
-  if (world.control.rudder_right) {
-    stickVel.z = 1.0;
-  }
-
-  stickPos.addCons(stickVel, stickA);
-  stickPos.subCons(stickPos, stickR);
 
   if (stickPos.z > 1.0) {
     stickPos.z = 1.0;
@@ -923,6 +911,9 @@ void Plane::keyScan(GameWorld& world) {
   if (stickPos.z < -1.0) {
     stickPos.z = -1.0;
   }
+
+  stickPos.addCons(stickVel, stickA);
+  stickPos.subCons(stickPos, stickR);
 
   const double r = sqrt(stickPos.x * stickPos.x + stickPos.y * stickPos.y);
   if (r > 1.0) {
@@ -960,7 +951,7 @@ void Plane::moveCalc(GameWorld& world) {
   wing[0].aAngle = -stickPos.y * 1.5 / 180.0 * PI;
   wing[1].aAngle = stickPos.y * 1.5 / 180.0 * PI;
   wing[2].aAngle = -stickPos.x * 6.0 / 180.0 * PI;
-  wing[3].aAngle = stickPos.z * app_config::RUDDER_DEFLECTION_DEG / 180.0 * PI;
+  wing[3].aAngle = stickPos.z * 6.0 / 180.0 * PI;
   wing[0].bAngle = wing[1].bAngle = wing[2].bAngle = wing[3].bAngle = 0.0;
   wing[4].aAngle = wing[4].bAngle = 0.0;
   wing[5].aAngle = wing[5].bAngle = 0.0;
@@ -1577,8 +1568,7 @@ void GameWorld::update() {
     return;
   }
 
-  if (control.shoot || control.left || control.right || control.up || control.down ||
-      control.rudder_left || control.rudder_right || control.boost) {
+  if (control.shoot || control.left || control.right || control.up || control.down || control.boost) {
     auto_flight = false;
   }
 
@@ -2377,8 +2367,6 @@ void update_controls() {
   const bool down = contains_char_key(status, '.');
   const bool left = contains_char_key(status, ',');
   const bool right = contains_char_key(status, '/');
-  const bool rudder_left = contains_char_key(status, 'l') || contains_char_key(status, 'L');
-  const bool rudder_right = contains_char_key(status, '\'') || contains_char_key(status, '"');
   const bool shoot = contains_char_key(status, 'a') || contains_char_key(status, 'A');
   const bool boost = contains_char_key(status, 's') || contains_char_key(status, 'S');
   const bool reset = contains_char_key(status, 'r') || contains_char_key(status, 'R');
@@ -2397,8 +2385,6 @@ void update_controls() {
   g_world.control.down = menu_active ? false : down;
   g_world.control.left = menu_active ? false : left;
   g_world.control.right = menu_active ? false : right;
-  g_world.control.rudder_left = menu_active ? false : rudder_left;
-  g_world.control.rudder_right = menu_active ? false : rudder_right;
   g_world.control.shoot = menu_active ? false : shoot;
   g_world.control.boost = menu_active ? false : boost;
 

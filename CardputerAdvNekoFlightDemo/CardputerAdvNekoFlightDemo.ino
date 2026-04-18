@@ -3,7 +3,7 @@
 #include <math.h>
 
 namespace app_config {
-constexpr double FMAX = 10000.0;
+constexpr double FMAX = 50000.0;
 constexpr int GSCALE = 32;
 constexpr int PMAX = 4;
 constexpr double G = -9.8;
@@ -1108,6 +1108,9 @@ void Plane::moveBullet(GameWorld& world) {
     }
     gunVx += xx;
     gunVy -= yy;
+  } else {
+    gunVx += (-gunX) * 0.08;
+    gunVy += (20.0 - gunY) * 0.08;
   }
   gunX += gunVx * 100.0 / 300.0;
   gunY += gunVy * 100.0 / 300.0;
@@ -1398,6 +1401,7 @@ void GameWorld::init() {
   objInit();
 
   for (int i = 0; i < app_config::PMAX; ++i) {
+    plane[i].posInit();
     plane[i].no = i;
   }
 
@@ -1414,7 +1418,9 @@ void GameWorld::init() {
   plane[2].level = 20;
   plane[3].level = 30;
 
-  auto_flight = true;
+  control = ControlState{};
+  camerapos.set(plane[0].pVel);
+  frame_counter = 0;
   started = true;
   paused = false;
 }
@@ -1799,7 +1805,7 @@ void setup() {
 
   g_world.init();
   g_last_frame_ms = millis();
-  Serial.println("Cardputer ADV nekoFlight started");
+  Serial.println("Cardputer ADV NekoFlight started");
 }
 
 void loop() {
