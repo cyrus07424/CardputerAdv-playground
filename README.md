@@ -13,6 +13,7 @@ Cardputer-ADV 向けの小さな Arduino デモ集です。Arduino IDE で開い
 | `CardputerAdvImu3dDemo` | 内蔵加速度 / ジャイロを使った 3D 姿勢ビジュアライズ | `M5Cardputer` |
 | `CardputerAdvNekoFlightDemo` | `NekoFlight` を移植した 3D フライト / 戦闘デモ | `M5Cardputer` |
 | `CardputerAdvNekoFlightAdvancedDemo` | `NekoFlight` を移植した 3D フライト / 戦闘デモ(拡張版) | `M5Cardputer` |
+| `CardputerAdvCSE2PortDemo` | `CSE2` の Cardputer-ADV 向け移植プロジェクト土台 | `M5Cardputer` |
 | `CardputerAdvDataHarvester` | Cap LoRa-1262 内蔵 GNSS と LoRa の受信情報収集・表示等 | `M5Cardputer`, `RadioLib`, `TinyGPSPlus` |
 
 ## 共通前提

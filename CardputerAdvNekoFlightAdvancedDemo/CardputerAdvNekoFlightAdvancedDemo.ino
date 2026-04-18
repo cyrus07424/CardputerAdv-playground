@@ -1118,16 +1118,8 @@ void Plane::autoFlight(GameWorld& world) {
     stickPos.y *= mm / m;
   }
 
-  if (gunTarget == target && gunTime < 1.0) {
-    if (!heatWait && gunTemp < MAXT - 1) {
-      gunShoot = true;
-    } else {
-      heatWait = true;
-    }
-  }
-
-  if (gunTemp < 2) {
-    heatWait = false;
+  if (gunTarget == target && gunTime < 1.0 && !heatWait && gunTemp < MAXT) {
+    gunShoot = true;
   }
   if (gunTarget == target) {
     aamShoot = true;
@@ -1213,7 +1205,8 @@ void Plane::moveBullet(GameWorld& world) {
     }
   }
 
-  if (gunShoot && gunTemp++ < Plane::MAXT) {
+  if (gunShoot && !heatWait && gunTemp < Plane::MAXT) {
+    ++gunTemp;
     for (int i = 0; i < BMAX; ++i) {
       if (bullet[i].use == 0) {
         bullet[i].vVel.setPlus(vpVel, oi);
@@ -1226,8 +1219,17 @@ void Plane::moveBullet(GameWorld& world) {
         break;
       }
     }
+
+    if (gunTemp >= Plane::MAXT) {
+      heatWait = true;
+    }
   } else if (gunTemp > 0) {
     gunTemp--;
+  }
+
+  if (gunTemp <= 0) {
+    gunTemp = 0;
+    heatWait = false;
   }
 }
 
@@ -1789,7 +1791,7 @@ void draw_battery_status(M5Canvas& canvas, int16_t width) {
   const uint16_t fill_color = capped_level > 20 ? TFT_GREENYELLOW : TFT_ORANGE;
 
   canvas.setTextColor(TFT_WHITE, TFT_BLACK);
-  canvas.setCursor(width - 58, 0);
+  canvas.setCursor(width - 50, 0);
   canvas.printf("%3d%%", capped_level);
   canvas.drawRect(icon_x, icon_y, icon_w, icon_h, TFT_WHITE);
   canvas.fillRect(icon_x + icon_w, icon_y + 2, 2, icon_h - 4, TFT_WHITE);
@@ -1848,15 +1850,16 @@ void draw_vertical_meter(
 }
 
 void draw_mode_banner(M5Canvas& canvas, bool auto_flight) {
-  const int16_t banner_w = 66;
+  const char* mode_text = auto_flight ? "AUTO" : "MANUAL";
+  const int16_t banner_w = canvas.textWidth(mode_text) + 10;
   const int16_t banner_h = 14;
   const int16_t banner_x = (canvas.width() - banner_w) / 2;
   const int16_t banner_y = 2;
   const uint16_t mode_color = auto_flight ? TFT_YELLOW : TFT_CYAN;
   draw_hud_panel(canvas, banner_x, banner_y, banner_w, banner_h, mode_color);
   canvas.setTextColor(mode_color, TFT_BLACK);
-  canvas.setCursor(banner_x + 8, banner_y + 3);
-  canvas.print(auto_flight ? "AUTO" : "MANUAL");
+  canvas.setCursor(banner_x + (banner_w - canvas.textWidth(mode_text)) / 2, banner_y + 3);
+  canvas.print(mode_text);
 }
 
 constexpr int kUiMenuItemCount = 12;
@@ -2039,7 +2042,7 @@ void draw_hud_tape(
   const int16_t tick_outer_x = left_side ? box_x + box_w + 7 : box_x - 8;
   const int16_t tick_inner_x = left_side ? tick_outer_x - 8 : tick_outer_x + 8;
 
-  canvas.setTextColor(color, TFT_BLACK);
+  canvas.setTextColor(color);
   canvas.setCursor(box_x + 2, top_y - 8);
   canvas.print(label);
 
@@ -2115,7 +2118,7 @@ void draw_pitch_ladder(M5Canvas& canvas, int16_t cx, int16_t cy, float pitch_deg
       int16_t tx;
       int16_t ty;
       rotate_around_origin(-half_width - 10, y_offset - 3, roll_rad, tx, ty);
-      canvas.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      canvas.setTextColor(TFT_DARKGREY);
       canvas.setCursor(cx + tx, cy + ty);
       canvas.printf("%d", -mark);
     }
@@ -2214,11 +2217,12 @@ int count_remaining_missiles(const Plane& player) {
 }
 
 void draw_missile_ammo_hud(M5Canvas& canvas, const Plane& player) {
+  const int remaining_missiles = count_remaining_missiles(player);
   char ammo_text[12];
-  snprintf(ammo_text, sizeof(ammo_text), "%02d/%02d", count_remaining_missiles(player), Plane::MMMAX);
+  snprintf(ammo_text, sizeof(ammo_text), "%02d/%02d", remaining_missiles, Plane::MMMAX);
   canvas.setTextFont(0);
   canvas.setTextSize(1);
-  canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
+  canvas.setTextColor(remaining_missiles == 0 ? TFT_RED : TFT_CYAN);
   if constexpr (app_config::SHOW_AAM_LABEL) {
     canvas.setCursor(canvas.width() / 2 - canvas.textWidth("AAM") / 2, canvas.height() - 30);
     canvas.print("AAM");
@@ -2232,6 +2236,7 @@ void draw_missile_ammo_hud(M5Canvas& canvas, const Plane& player) {
 }
 
 void draw_gun_heat_bar(M5Canvas& canvas, const Plane& player) {
+  const char* gun_text = "GUN";
   const int16_t bar_w = 32;
   const int16_t bar_h = 3;
   const int16_t bar_x = canvas.width() / 2 - bar_w / 2;
@@ -2266,9 +2271,9 @@ void draw_gun_heat_bar(M5Canvas& canvas, const Plane& player) {
   if constexpr (app_config::SHOW_GUN_HEAT_LABEL) {
     canvas.setTextFont(0);
     canvas.setTextSize(1);
-    canvas.setTextColor(heat_color, TFT_BLACK);
-    canvas.setCursor(canvas.width() / 2 - canvas.textWidth("GUN") / 2, bar_y - 10);
-    canvas.print("GUN");
+    canvas.setTextColor(heat_color);
+    canvas.setCursor(canvas.width() / 2 - canvas.textWidth(gun_text) / 2, bar_y - 10);
+    canvas.print(gun_text);
     canvas.setTextFont(1);
   }
 }
@@ -2282,7 +2287,7 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
   }
 
   if (world.chrome_visible && world.ui_header_visible) {
-    canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+    canvas.setTextColor(TFT_GREEN);
     canvas.setCursor(0, 0);
     canvas.print("NekoFlight ADV");
     draw_battery_status(canvas, canvas.width());
@@ -2324,7 +2329,6 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
     canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
     canvas.setCursor(panel_x + 4, panel_y + 3);
     canvas.print("TGT");
-    canvas.setTextColor(TFT_ORANGE, TFT_BLACK);
     canvas.setCursor(panel_x + 4, panel_y + 11);
     canvas.printf("%4d", static_cast<int>(player.targetDis));
   }
@@ -2337,7 +2341,7 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
   }
 
   if (world.chrome_visible && world.ui_footer_visible) {
-    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setTextColor(TFT_WHITE);
     canvas.setCursor(0, app_config::FOOTER_Y);
     canvas.print("A:Fire S:Boost R:Reset Ent:Auto fn:UI");
   }
