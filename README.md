@@ -16,6 +16,8 @@ Cardputer-ADV 向けの Arduino デモ集です。Arduino IDE で開いてその
 | `CardputerAdvTRexRunnerDemo` | `T-Rex Runner` 風デモ | `M5Cardputer` |
 | `CardputerAdvCharisoDemo` | `チャリ走 2nd Race` 風デモ | `M5Cardputer` |
 | `CardputerAdvVoxelburgDemo` | `Attack on Voxelburg` 風デモ | `M5Cardputer` |
+| `CardputerAdvAnalogClockDemo` | クロノグラフアナログ時計 | `M5Cardputer` |
+| `CardputerAdvGhostmanDemo` | ゴースト側を操作する追跡アクション | `M5Cardputer` |
 | `CardputerAdvImu3dDemo` | 内蔵加速度 / ジャイロを使った 3D 姿勢ビジュアライズ | `M5Cardputer` |
 | `CardputerAdvNekoFlightDemo` | `NekoFlight` を移植した 3D フライト / 戦闘デモ | `M5Cardputer` |
 | `CardputerAdvNekoFlightAdvancedDemo` | `NekoFlight` を移植した 3D フライト / 戦闘デモ(拡張版) | `M5Cardputer` |
