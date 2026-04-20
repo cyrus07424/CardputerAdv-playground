@@ -303,10 +303,11 @@ class GameWorld {
   bool paused;
   bool chrome_visible;
   bool menu_visible;
-  bool ui_attitude_visible;
+  bool ui_pitch_ladder_visible;
   bool ui_reticle_visible;
   bool ui_lock_box_visible;
   bool ui_enemy_arrows_visible;
+  bool ui_heading_visible;
   bool ui_speed_visible;
   bool ui_altitude_visible;
   bool ui_tgt_visible;
@@ -375,10 +376,11 @@ bool contains_hid_key(const Keyboard_Class::KeysState& status, uint8_t key_code)
 void reset_stage_preserve_ui(GameWorld& world) {
   const bool chrome_visible = world.chrome_visible;
   const bool menu_visible = world.menu_visible;
-  const bool ui_attitude_visible = world.ui_attitude_visible;
+  const bool ui_pitch_ladder_visible = world.ui_pitch_ladder_visible;
   const bool ui_reticle_visible = world.ui_reticle_visible;
   const bool ui_lock_box_visible = world.ui_lock_box_visible;
   const bool ui_enemy_arrows_visible = world.ui_enemy_arrows_visible;
+  const bool ui_heading_visible = world.ui_heading_visible;
   const bool ui_speed_visible = world.ui_speed_visible;
   const bool ui_altitude_visible = world.ui_altitude_visible;
   const bool ui_tgt_visible = world.ui_tgt_visible;
@@ -394,10 +396,11 @@ void reset_stage_preserve_ui(GameWorld& world) {
 
   world.chrome_visible = chrome_visible;
   world.menu_visible = menu_visible;
-  world.ui_attitude_visible = ui_attitude_visible;
+  world.ui_pitch_ladder_visible = ui_pitch_ladder_visible;
   world.ui_reticle_visible = ui_reticle_visible;
   world.ui_lock_box_visible = ui_lock_box_visible;
   world.ui_enemy_arrows_visible = ui_enemy_arrows_visible;
+  world.ui_heading_visible = ui_heading_visible;
   world.ui_speed_visible = ui_speed_visible;
   world.ui_altitude_visible = ui_altitude_visible;
   world.ui_tgt_visible = ui_tgt_visible;
@@ -498,10 +501,11 @@ GameWorld::GameWorld()
       paused(false),
       chrome_visible(true),
       menu_visible(false),
-      ui_attitude_visible(true),
+      ui_pitch_ladder_visible(true),
       ui_reticle_visible(true),
       ui_lock_box_visible(true),
       ui_enemy_arrows_visible(true),
+      ui_heading_visible(true),
       ui_speed_visible(true),
       ui_altitude_visible(true),
       ui_tgt_visible(true),
@@ -1862,13 +1866,13 @@ void draw_mode_banner(M5Canvas& canvas, bool auto_flight) {
   canvas.print(mode_text);
 }
 
-constexpr int kUiMenuItemCount = 12;
+constexpr int kUiMenuItemCount = 13;
 constexpr int kUiMenuVisibleRows = 9;
 
 const char* ui_menu_label(int index) {
   switch (index) {
     case 0:
-      return "Attitude HUD";
+      return "Pitch Ladder";
     case 1:
       return "Reticle";
     case 2:
@@ -1876,20 +1880,22 @@ const char* ui_menu_label(int index) {
     case 3:
       return "Enemy Arrows";
     case 4:
-      return "Speed Tape";
+      return "Heading Tape";
     case 5:
-      return "Altitude Tape";
+      return "Speed Tape";
     case 6:
-      return "TGT Panel";
+      return "Altitude Tape";
     case 7:
-      return "AAM Ammo";
+      return "TGT Panel";
     case 8:
-      return "Gun Heat";
+      return "AAM Ammo";
     case 9:
-      return "Header";
+      return "Gun Heat";
     case 10:
-      return "Mode Banner";
+      return "Header";
     case 11:
+      return "Mode Banner";
+    case 12:
       return "Footer";
     default:
       return "";
@@ -1899,7 +1905,7 @@ const char* ui_menu_label(int index) {
 bool ui_menu_value(const GameWorld& world, int index) {
   switch (index) {
     case 0:
-      return world.ui_attitude_visible;
+      return world.ui_pitch_ladder_visible;
     case 1:
       return world.ui_reticle_visible;
     case 2:
@@ -1907,20 +1913,22 @@ bool ui_menu_value(const GameWorld& world, int index) {
     case 3:
       return world.ui_enemy_arrows_visible;
     case 4:
-      return world.ui_speed_visible;
+      return world.ui_heading_visible;
     case 5:
-      return world.ui_altitude_visible;
+      return world.ui_speed_visible;
     case 6:
-      return world.ui_tgt_visible;
+      return world.ui_altitude_visible;
     case 7:
-      return world.ui_aam_ammo_visible;
+      return world.ui_tgt_visible;
     case 8:
-      return world.ui_gun_heat_visible;
+      return world.ui_aam_ammo_visible;
     case 9:
-      return world.ui_header_visible;
+      return world.ui_gun_heat_visible;
     case 10:
-      return world.ui_mode_banner_visible;
+      return world.ui_header_visible;
     case 11:
+      return world.ui_mode_banner_visible;
+    case 12:
       return world.ui_footer_visible;
     default:
       return false;
@@ -1930,7 +1938,7 @@ bool ui_menu_value(const GameWorld& world, int index) {
 void toggle_ui_menu_value(GameWorld& world, int index) {
   switch (index) {
     case 0:
-      world.ui_attitude_visible = !world.ui_attitude_visible;
+      world.ui_pitch_ladder_visible = !world.ui_pitch_ladder_visible;
       break;
     case 1:
       world.ui_reticle_visible = !world.ui_reticle_visible;
@@ -1942,27 +1950,30 @@ void toggle_ui_menu_value(GameWorld& world, int index) {
       world.ui_enemy_arrows_visible = !world.ui_enemy_arrows_visible;
       break;
     case 4:
-      world.ui_speed_visible = !world.ui_speed_visible;
+      world.ui_heading_visible = !world.ui_heading_visible;
       break;
     case 5:
-      world.ui_altitude_visible = !world.ui_altitude_visible;
+      world.ui_speed_visible = !world.ui_speed_visible;
       break;
     case 6:
-      world.ui_tgt_visible = !world.ui_tgt_visible;
+      world.ui_altitude_visible = !world.ui_altitude_visible;
       break;
     case 7:
-      world.ui_aam_ammo_visible = !world.ui_aam_ammo_visible;
+      world.ui_tgt_visible = !world.ui_tgt_visible;
       break;
     case 8:
-      world.ui_gun_heat_visible = !world.ui_gun_heat_visible;
+      world.ui_aam_ammo_visible = !world.ui_aam_ammo_visible;
       break;
     case 9:
-      world.ui_header_visible = !world.ui_header_visible;
+      world.ui_gun_heat_visible = !world.ui_gun_heat_visible;
       break;
     case 10:
-      world.ui_mode_banner_visible = !world.ui_mode_banner_visible;
+      world.ui_header_visible = !world.ui_header_visible;
       break;
     case 11:
+      world.ui_mode_banner_visible = !world.ui_mode_banner_visible;
+      break;
+    case 12:
       world.ui_footer_visible = !world.ui_footer_visible;
       break;
   }
@@ -2023,6 +2034,103 @@ void draw_popup_menu(M5Canvas& canvas, const GameWorld& world) {
   }
 }
 
+float hud_scale(const M5Canvas& canvas) {
+  const float scale_w = static_cast<float>(canvas.width()) / 240.0f;
+  const float scale_h = static_cast<float>(canvas.height()) / 135.0f;
+  const float scale = min(scale_w, scale_h);
+  return scale < 1.0f ? 1.0f : scale;
+}
+
+int normalize_heading_degrees(int heading_deg) {
+  int normalized = heading_deg % 360;
+  if (normalized < 0) {
+    normalized += 360;
+  }
+  return normalized;
+}
+
+bool heading_label(int heading_deg, char* buffer, size_t buffer_size) {
+  const int normalized = normalize_heading_degrees(heading_deg);
+  switch (normalized) {
+    case 0:
+      snprintf(buffer, buffer_size, "N");
+      return true;
+    case 90:
+      snprintf(buffer, buffer_size, "E");
+      return true;
+    case 180:
+      snprintf(buffer, buffer_size, "S");
+      return true;
+    case 270:
+      snprintf(buffer, buffer_size, "W");
+      return true;
+    default:
+      buffer[0] = '\0';
+      return false;
+  }
+}
+
+void draw_hud_heading_tape(
+    M5Canvas& canvas,
+    int16_t center_x,
+    int16_t top_y,
+    int heading_deg,
+    int step_deg,
+    int major_step_deg,
+    int range_deg,
+    uint16_t color) {
+  const float scale = hud_scale(canvas);
+  const float tape_scale = scale * 0.25f;
+  const int16_t tape_w = static_cast<int16_t>(roundf(256.0f * tape_scale));
+  const int16_t tape_h = static_cast<int16_t>(roundf(18.0f * tape_scale));
+  const int16_t left_x = center_x - tape_w / 2;
+  const int16_t right_x = left_x + tape_w;
+  const int16_t tick_bottom_y = top_y + tape_h - 2;
+  const int16_t label_y = top_y;
+  const int16_t center_mark_h = max<int16_t>(2, static_cast<int16_t>(roundf(4.0f * tape_scale)));
+  const int16_t minor_tick_h = max<int16_t>(2, static_cast<int16_t>(roundf(4.0f * tape_scale)));
+  const float pixels_per_step =
+      (step_deg > 0 && range_deg > 0) ? (static_cast<float>(tape_w) * step_deg) / (2.0f * range_deg) : 1.0f;
+  const int normalized_heading = normalize_heading_degrees(heading_deg);
+
+  canvas.setTextColor(color);
+
+  const int first_tick =
+      static_cast<int>(floorf(static_cast<float>(normalized_heading - range_deg) / step_deg)) * step_deg;
+  const int last_tick =
+      static_cast<int>(ceilf(static_cast<float>(normalized_heading + range_deg) / step_deg)) * step_deg;
+
+  for (int tick = first_tick; tick <= last_tick; tick += step_deg) {
+    const int16_t x = center_x +
+                      static_cast<int16_t>(roundf((static_cast<float>(tick - normalized_heading) / step_deg) *
+                                                  pixels_per_step));
+    if (x < left_x || x > right_x) {
+      continue;
+    }
+
+    const int wrapped_tick = normalize_heading_degrees(tick);
+    const bool major = major_step_deg > 0 && (wrapped_tick % major_step_deg) == 0;
+    const int16_t tick_top_y = major ? label_y - 2 : tick_bottom_y - minor_tick_h;
+    if (major) {
+      char tick_label[4];
+      if (heading_label(wrapped_tick, tick_label, sizeof(tick_label))) {
+        const int16_t label_w = canvas.textWidth(tick_label);
+        const int16_t text_x = x - label_w / 2;
+        if (text_x >= left_x && text_x + label_w <= right_x) {
+          canvas.setCursor(text_x, label_y - 2);
+          canvas.print(tick_label);
+        }
+      } else {
+        canvas.drawLine(x, tick_top_y, x, tick_bottom_y, color);
+      }
+    } else {
+      canvas.drawLine(x, tick_top_y, x, tick_bottom_y, color);
+    }
+  }
+
+  canvas.drawLine(center_x, top_y + tape_h, center_x, top_y + tape_h + center_mark_h, color);
+}
+
 void draw_hud_tape(
     M5Canvas& canvas,
     int16_t center_x,
@@ -2056,7 +2164,7 @@ void draw_hud_tape(
 
   for (int tick_value = first_tick; tick_value <= last_tick; tick_value += step) {
     const float offset_steps = static_cast<float>(tick_value - value) / step;
-    const int16_t y = center_y + static_cast<int16_t>(offset_steps * pixels_per_step);
+    const int16_t y = center_y - static_cast<int16_t>(offset_steps * pixels_per_step);
     if (y < top_y || y > top_y + tape_h) {
       continue;
     }
@@ -2125,7 +2233,7 @@ void draw_pitch_ladder(M5Canvas& canvas, int16_t cx, int16_t cy, float pitch_deg
   }
 }
 
-void draw_attitude_hud(M5Canvas& canvas, const Plane& player) {
+void draw_pitch_ladder_hud(M5Canvas& canvas, const Plane& player) {
   const int16_t cx = app_config::SCREEN_W / 2;
   const int16_t cy = 70;
   const float pitch_deg = static_cast<float>(player.aVel.x * RAD_TO_DEG);
@@ -2280,10 +2388,15 @@ void draw_gun_heat_bar(M5Canvas& canvas, const Plane& player) {
 
 void draw_hud(M5Canvas& canvas, const GameWorld& world) {
   const Plane& player = world.plane[0];
+  const int heading_deg = normalize_heading_degrees(static_cast<int>(round(player.aVel.z * RAD_TO_DEG)));
   canvas.setTextFont(1);
   canvas.setTextSize(1);
   if (world.chrome_visible && world.ui_mode_banner_visible) {
     draw_mode_banner(canvas, world.auto_flight);
+  }
+
+  if (world.chrome_visible && world.ui_heading_visible) {
+    draw_hud_heading_tape(canvas, canvas.width() / 2, 24, heading_deg, 5, 30, 60, TFT_GREENYELLOW);
   }
 
   if (world.chrome_visible && world.ui_header_visible) {
@@ -2352,8 +2465,8 @@ void GameWorld::draw(M5Canvas& canvas) {
   plane[0].checkTrans();
   writeGround(canvas);
   writePlane(canvas);
-  if (ui_attitude_visible) {
-    draw_attitude_hud(canvas, plane[0]);
+  if (ui_pitch_ladder_visible) {
+    draw_pitch_ladder_hud(canvas, plane[0]);
   }
   if (ui_enemy_arrows_visible) {
     draw_enemy_direction_arrows(canvas, *this);

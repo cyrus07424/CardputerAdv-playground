@@ -1734,7 +1734,7 @@ void draw_hud(M5Canvas& canvas, const GameWorld& world) {
   canvas.setTextSize(1);
   canvas.setTextColor(TFT_GREEN, TFT_BLACK);
   canvas.setCursor(0, 0);
-  canvas.print("nekoFlight ADV");
+  canvas.print("NekoFlight ADV");
   draw_battery_status(canvas, canvas.width());
 
   canvas.setTextColor(world.auto_flight ? TFT_YELLOW : TFT_CYAN, TFT_BLACK);
