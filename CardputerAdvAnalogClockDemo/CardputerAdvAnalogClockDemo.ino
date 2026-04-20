@@ -876,41 +876,43 @@ void draw_info_panel() {
   g_canvas.setTextFont(1);
   g_canvas.setTextSize(1);
   g_canvas.setTextColor(TFT_CYAN, kBlack);
-  g_canvas.setCursor(app_config::PANEL_X, 8);
+  g_canvas.setCursor(app_config::PANEL_X, 4);
   g_canvas.print("Analog Clock");
 
   g_canvas.setTextColor(kWhite, kBlack);
-  g_canvas.setCursor(app_config::PANEL_X, 24);
+  g_canvas.setCursor(app_config::PANEL_X, 20);
   g_canvas.printf("%04d-%02d-%02d", g_clock_time.year, g_clock_time.month, g_clock_time.day);
-  g_canvas.setCursor(app_config::PANEL_X, 36);
+  g_canvas.setCursor(app_config::PANEL_X, 32);
   g_canvas.printf("%02d:%02d:%02d", g_clock_time.hour, g_clock_time.minute, g_clock_time.second);
 
   g_canvas.setTextColor(TFT_ORANGE, kBlack);
-  g_canvas.setCursor(app_config::PANEL_X, 54);
+  g_canvas.setCursor(app_config::PANEL_X, 50);
   g_canvas.print("CHRONO");
   g_canvas.setTextColor(kWhite, kBlack);
-  g_canvas.setCursor(app_config::PANEL_X, 66);
+  g_canvas.setCursor(app_config::PANEL_X, 62);
   g_canvas.printf("%02lu:%02lu.%02lu", chrono_minutes, chrono_seconds, chrono_hundredths);
-  g_canvas.setCursor(app_config::PANEL_X, 78);
+  g_canvas.setCursor(app_config::PANEL_X, 74);
   g_canvas.printf("STATE %s", stopwatch_status_label());
 
   g_canvas.setTextColor(TFT_DARKGREY, kBlack);
-  g_canvas.setCursor(app_config::PANEL_X, 92);
+  g_canvas.setCursor(app_config::PANEL_X, 88);
   g_canvas.printf("time:%s", g_clock_from_system ? "system" : "build");
 
   if (!g_show_help) {
-    g_canvas.setCursor(app_config::PANEL_X, 114);
+    g_canvas.setCursor(app_config::PANEL_X, 110);
     g_canvas.print("Enter/BtnA: help");
     return;
   }
 
   g_canvas.setTextColor(TFT_GREENYELLOW, kBlack);
-  g_canvas.setCursor(app_config::PANEL_X, 104);
+  g_canvas.setCursor(app_config::PANEL_X, 96);
   g_canvas.print("A start/resume");
-  g_canvas.setCursor(app_config::PANEL_X, 114);
+  g_canvas.setCursor(app_config::PANEL_X, 106);
   g_canvas.print("S stop  D split");
-  g_canvas.setCursor(app_config::PANEL_X, 124);
-  g_canvas.print("R reset Enter help");
+  g_canvas.setCursor(app_config::PANEL_X, 116);
+  g_canvas.print("R reset");
+  g_canvas.setCursor(app_config::PANEL_X, 126);
+  g_canvas.print("Enter help");
 }
 
 void draw_ui() {
