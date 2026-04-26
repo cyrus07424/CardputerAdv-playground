@@ -19,8 +19,8 @@
 #ifndef BUILD_ENABLE_BLE_SCAN
 #define BUILD_ENABLE_BLE_SCAN 0
 #endif
-#ifndef BUILD_ENABLE_JSONL_LOG
-#define BUILD_ENABLE_JSONL_LOG 1
+#ifndef BUILD_ENABLE_WIGLE_LOG
+#define BUILD_ENABLE_WIGLE_LOG 1
 #endif
 
 #if BUILD_ENABLE_BLE_SCAN
@@ -38,7 +38,7 @@ extern "C" {
 // 1. BUILD_ENABLE_BLE_SCAN
 // 2. BUILD_ENABLE_USB_STORAGE
 // 3. BUILD_ENABLE_WIFI_SCAN
-// 4. BUILD_ENABLE_JSONL_LOG
+// 4. BUILD_ENABLE_WIGLE_LOG
 // Note: BUILD_ENABLE_BLE_SCAN remains experimental on the current Arduino core.
 
 namespace board_pins {
@@ -67,7 +67,6 @@ constexpr size_t QUERY_LINE_MAX_LEN = 127;
 }
 
 namespace harvest_log_config {
-constexpr uint32_t SNAPSHOT_INTERVAL_MS = 5000;
 constexpr uint32_t WIFI_SCAN_INTERVAL_MS = 30000;
 constexpr uint32_t BLE_SCAN_INTERVAL_MS = 30000;
 constexpr uint32_t BLE_SCAN_DURATION_S = 4;
@@ -107,7 +106,7 @@ constexpr size_t ITEM_COUNT = 3;
 namespace log_dir_config {
 constexpr const char* GPS = "/gps";
 constexpr const char* LORA = "/lora";
-constexpr const char* JSONL = "/jsonl";
+constexpr const char* WIGLE = "/wigle";
 }
 
 namespace text_mode_config {
@@ -173,6 +172,8 @@ struct BluetoothScanResult {
   String name;
   String address;
   int32_t rssi = 0;
+  uint16_t manufacturer_id = 0;
+  bool has_manufacturer_id = false;
   uint32_t last_seen_ms = 0;
 };
 
@@ -190,7 +191,7 @@ USBMSC g_usb_msc;
 #endif
 File g_gps_log_file;
 File g_lora_log_file;
-File g_jsonl_log_file;
+File g_wigle_log_file;
 
 volatile bool g_radio_rx_flag = false;
 bool g_needs_redraw = true;
@@ -206,7 +207,7 @@ bool g_ble_scan_active = false;
 String g_status = "Booting...";
 String g_gps_log_path;
 String g_lora_log_path;
-String g_jsonl_log_path;
+String g_wigle_log_path;
 String g_nmea_sentence;
 String g_gnss_version = "-";
 String g_gnss_mode = "-";
@@ -218,12 +219,11 @@ uint32_t g_last_draw_ms = 0;
 uint32_t g_last_data_ms = 0;
 uint32_t g_last_gnss_info_ms = 0;
 uint32_t g_last_sd_check_ms = 0;
-uint32_t g_last_json_snapshot_ms = 0;
 uint32_t g_last_wifi_scan_ms = 0;
 uint32_t g_last_ble_scan_ms = 0;
 uint32_t g_logged_sentence_count = 0;
 uint32_t g_logged_lora_count = 0;
-uint32_t g_logged_json_count = 0;
+uint32_t g_logged_wigle_count = 0;
 size_t g_text_scroll_offset = 0;
 size_t g_signal_scroll_offset = 0;
 size_t g_wireless_scroll_offset = 0;
@@ -298,76 +298,6 @@ String format_log_timestamp() {
     return utc;
   }
   return "millis=" + String(millis());
-}
-
-String json_escape(const String& text) {
-  String escaped;
-  escaped.reserve(text.length() + 8);
-  for (size_t i = 0; i < text.length(); ++i) {
-    const char c = text[i];
-    switch (c) {
-      case '\\':
-        escaped += "\\\\";
-        break;
-      case '"':
-        escaped += "\\\"";
-        break;
-      case '\b':
-        escaped += "\\b";
-        break;
-      case '\f':
-        escaped += "\\f";
-        break;
-      case '\n':
-        escaped += "\\n";
-        break;
-      case '\r':
-        escaped += "\\r";
-        break;
-      case '\t':
-        escaped += "\\t";
-        break;
-      default:
-        if (static_cast<unsigned char>(c) < 32) {
-          char buffer[7];
-          snprintf(buffer, sizeof(buffer), "\\u%04x", static_cast<unsigned char>(c));
-          escaped += buffer;
-        } else {
-          escaped += c;
-        }
-        break;
-    }
-  }
-  return escaped;
-}
-
-String json_string(const String& text) {
-  return "\"" + json_escape(text) + "\"";
-}
-
-const char* wifi_auth_name(wifi_auth_mode_t encryption) {
-  switch (encryption) {
-    case WIFI_AUTH_OPEN:
-      return "open";
-    case WIFI_AUTH_WEP:
-      return "wep";
-    case WIFI_AUTH_WPA_PSK:
-      return "wpa-psk";
-    case WIFI_AUTH_WPA2_PSK:
-      return "wpa2-psk";
-    case WIFI_AUTH_WPA_WPA2_PSK:
-      return "wpa-wpa2-psk";
-    case WIFI_AUTH_WPA2_ENTERPRISE:
-      return "wpa2-enterprise";
-    case WIFI_AUTH_WPA3_PSK:
-      return "wpa3-psk";
-    case WIFI_AUTH_WPA2_WPA3_PSK:
-      return "wpa2-wpa3-psk";
-    case WIFI_AUTH_WAPI_PSK:
-      return "wapi-psk";
-    default:
-      return "unknown";
-  }
 }
 
 String bluetooth_mac_address() {
@@ -480,13 +410,13 @@ size_t text_mode_line_count() {
   line_count += 1;  // GPS log status
   line_count += 1;  // LoRa status
   line_count += 1;  // Counters
-  line_count += 1;  // JSONL count
+  line_count += 1;  // WiGLE count
   line_count += 1;  // GNSS mode
   line_count += 1;  // GNSS version
   line_count += 1;  // WiFi / BT
   line_count += 1;  // GPS file
   line_count += 1;  // LoRa file
-  line_count += 1;  // JSONL file
+  line_count += 1;  // WiGLE file
   return line_count;
 }
 
@@ -660,7 +590,7 @@ String log_status_text() {
   if (!g_sd_ready) {
     return "No SD";
   }
-  if (g_gps_log_file || g_lora_log_file) {
+  if (g_gps_log_file || g_lora_log_file || g_wigle_log_file) {
     return "REC";
   }
   return "Ready";
@@ -768,7 +698,11 @@ uint16_t wifi_signal_color(int32_t rssi) {
   return TFT_RED;
 }
 
-void upsert_bluetooth_scan_result(const String& address, const String& name, int32_t rssi) {
+void upsert_bluetooth_scan_result(const String& address,
+                                  const String& name,
+                                  int32_t rssi,
+                                  uint16_t manufacturer_id,
+                                  bool has_manufacturer_id) {
   if (address.length() == 0) {
     return;
   }
@@ -786,6 +720,8 @@ void upsert_bluetooth_scan_result(const String& address, const String& name, int
   result.address = address;
   result.name = name;
   result.rssi = rssi;
+  result.manufacturer_id = manufacturer_id;
+  result.has_manufacturer_id = has_manufacturer_id;
   result.last_seen_ms = now;
 
   if (existing_index < g_bluetooth_scan_count) {
@@ -813,6 +749,7 @@ void start_bluetooth_scan() {
   if (!g_ble_ready || !g_ble_scan_configured || g_ble_scan_active) {
     return;
   }
+  g_bluetooth_scan_count = 0;
   if (esp_ble_gap_start_scanning(harvest_log_config::BLE_SCAN_DURATION_S) != ESP_OK) {
     return;
   }
@@ -842,14 +779,18 @@ void bluetooth_gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t
     case ESP_GAP_BLE_SCAN_RESULT_EVT:
       if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT) {
         const uint8_t adv_len = param->scan_rst.adv_data_len + param->scan_rst.scan_rsp_len;
+        bool has_manufacturer_id = false;
         upsert_bluetooth_scan_result(
             bluetooth_address_string(param->scan_rst.bda),
             bluetooth_adv_name(param->scan_rst.ble_adv, adv_len),
-            param->scan_rst.rssi);
+            param->scan_rst.rssi,
+            bluetooth_manufacturer_id(param->scan_rst.ble_adv, adv_len, &has_manufacturer_id),
+            has_manufacturer_id);
         g_needs_redraw = true;
       } else if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
         g_ble_scan_active = false;
         g_last_ble_scan_ms = millis();
+        append_bluetooth_scan_results_to_wigle();
         g_needs_redraw = true;
       }
       break;
@@ -1014,7 +955,7 @@ void close_file(File& file) {
 void close_log_files() {
   close_file(g_gps_log_file);
   close_file(g_lora_log_file);
-  close_file(g_jsonl_log_file);
+  close_file(g_wigle_log_file);
 }
 
 

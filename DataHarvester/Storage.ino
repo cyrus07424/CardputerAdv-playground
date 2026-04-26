@@ -36,7 +36,7 @@ void mark_sd_unavailable() {
   close_log_files();
   g_gps_log_path = "";
   g_lora_log_path = "";
-  g_jsonl_log_path = "";
+  g_wigle_log_path = "";
   clear_explorer_entries();
   g_explorer_loaded = false;
   g_explorer_viewing_file = false;
@@ -120,7 +120,6 @@ void enter_harvest_mode() {
   }
   g_app_mode = AppMode::Harvest;
   g_last_gnss_info_ms = 0;
-  g_last_json_snapshot_ms = 0;
   g_last_wifi_scan_ms = 0;
   g_last_ble_scan_ms = 0;
   g_text_scroll_offset = 0;
@@ -198,8 +197,8 @@ String build_lora_log_path() {
   return build_log_path(log_dir_config::LORA, "lora", ".log");
 }
 
-String build_jsonl_log_path() {
-  return build_log_path(log_dir_config::JSONL, "harvest", ".jsonl");
+String build_wigle_log_path() {
+  return build_log_path(log_dir_config::WIGLE, "harvest", ".csv");
 }
 
 void init_spi_bus() {
@@ -280,24 +279,154 @@ bool open_lora_log_file_if_needed() {
   return true;
 }
 
-bool open_jsonl_log_file_if_needed() {
-#if BUILD_ENABLE_JSONL_LOG
+String wigle_csv_escape(const String& text) {
+  bool needs_quotes = false;
+  String escaped;
+  escaped.reserve(text.length() + 4);
+
+  for (size_t i = 0; i < text.length(); ++i) {
+    const char c = text[i];
+    if (c == '"' || c == ',' || c == '\n' || c == '\r') {
+      needs_quotes = true;
+    }
+    if (c == '"') {
+      escaped += "\"\"";
+    } else if (c != '\r') {
+      escaped += c;
+    }
+  }
+
+  if (!needs_quotes) {
+    return escaped;
+  }
+  return "\"" + escaped + "\"";
+}
+
+String wigle_timestamp() {
+  if (!gps.date.isValid() || !gps.time.isValid()) {
+    return "";
+  }
+
+  char buffer[24];
+  snprintf(buffer,
+           sizeof(buffer),
+           "%04d-%02d-%02d %02d:%02d:%02d",
+           gps.date.year(),
+           gps.date.month(),
+           gps.date.day(),
+           gps.time.hour(),
+           gps.time.minute(),
+           gps.time.second());
+  return String(buffer);
+}
+
+bool wigle_has_observation_fix() {
+  return gps.location.isValid() && gps.date.isValid() && gps.time.isValid();
+}
+
+String wigle_latitude() {
+  return gps.location.isValid() ? String(gps.location.lat(), 8) : "";
+}
+
+String wigle_longitude() {
+  return gps.location.isValid() ? String(gps.location.lng(), 8) : "";
+}
+
+String wigle_altitude_meters() {
+  return gps.altitude.isValid() ? String(static_cast<long>(lround(gps.altitude.meters()))) : "";
+}
+
+String wigle_accuracy_meters() {
+  if (!gps.hdop.isValid()) {
+    return "";
+  }
+  return String(gps.hdop.hdop() * 5.0, 1);
+}
+
+int32_t wifi_frequency_mhz(int32_t channel) {
+  if (channel == 14) {
+    return 2484;
+  }
+  if (channel >= 1 && channel <= 13) {
+    return 2407 + channel * 5;
+  }
+  if (channel >= 32) {
+    return 5000 + channel * 5;
+  }
+  return 0;
+}
+
+String wigle_wifi_capabilities(wifi_auth_mode_t encryption) {
+  switch (encryption) {
+    case WIFI_AUTH_OPEN:
+      return "[ESS]";
+    case WIFI_AUTH_WEP:
+      return "[WEP][ESS]";
+    case WIFI_AUTH_WPA_PSK:
+      return "[WPA-PSK][ESS]";
+    case WIFI_AUTH_WPA2_PSK:
+      return "[WPA2-PSK][ESS]";
+    case WIFI_AUTH_WPA_WPA2_PSK:
+      return "[WPA-PSK][WPA2-PSK][ESS]";
+    case WIFI_AUTH_WPA2_ENTERPRISE:
+      return "[WPA2-EAP][ESS]";
+    case WIFI_AUTH_WPA3_PSK:
+      return "[WPA3-PSK][ESS]";
+    case WIFI_AUTH_WPA2_WPA3_PSK:
+      return "[WPA2-PSK][WPA3-PSK][ESS]";
+    case WIFI_AUTH_WAPI_PSK:
+      return "[WAPI-PSK][ESS]";
+    default:
+      return "[ESS]";
+  }
+}
+
+String wigle_preheader_line() {
+  return "WigleWifi-1.6,appRelease=DataHarvester,model=" + String(ESP.getChipModel()) +
+         ",release=" + String(ESP.getSdkVersion()) +
+         ",device=CardputerADV,display=240x135,board=m5stack_cardputer,brand=M5Stack,star=Sol,body=3,subBody=0";
+}
+
+String wigle_header_line() {
+  return "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type";
+}
+
+bool append_wigle_line(const String& line) {
+  const size_t expected_bytes = line.length() + 2;
+  size_t written_bytes = g_wigle_log_file.print(line);
+  written_bytes += g_wigle_log_file.print("\r\n");
+  g_wigle_log_file.flush();
+  if (written_bytes < expected_bytes) {
+    mark_sd_unavailable();
+    return false;
+  }
+  return true;
+}
+
+bool open_wigle_log_file_if_needed() {
+#if BUILD_ENABLE_WIGLE_LOG
   if (!g_sd_ready) {
     return false;
   }
-  if (g_jsonl_log_file) {
+  if (g_wigle_log_file) {
     return true;
   }
-  if (!ensure_log_directory(log_dir_config::JSONL)) {
+  if (!ensure_log_directory(log_dir_config::WIGLE)) {
     mark_sd_unavailable();
     return false;
   }
 
-  g_jsonl_log_path = build_jsonl_log_path();
-  g_jsonl_log_file = SD.open(g_jsonl_log_path.c_str(), FILE_APPEND);
-  if (!g_jsonl_log_file) {
+  g_wigle_log_path = build_wigle_log_path();
+  g_wigle_log_file = SD.open(g_wigle_log_path.c_str(), FILE_APPEND);
+  if (!g_wigle_log_file) {
     mark_sd_unavailable();
     return false;
+  }
+
+  if (g_wigle_log_file.size() == 0) {
+    if (!append_wigle_line(wigle_preheader_line()) || !append_wigle_line(wigle_header_line())) {
+      return false;
+    }
   }
 
   g_needs_redraw = true;
@@ -333,6 +462,39 @@ void scan_wifi_networks() {
     ++g_wifi_scan_count;
   }
   WiFi.scanDelete();
+
+#if BUILD_ENABLE_WIGLE_LOG
+  if (g_wifi_scan_count > 0 && wigle_has_observation_fix() && open_wigle_log_file_if_needed()) {
+    const String timestamp = wigle_timestamp();
+    const String latitude = wigle_latitude();
+    const String longitude = wigle_longitude();
+    const String altitude = wigle_altitude_meters();
+    const String accuracy = wigle_accuracy_meters();
+
+    for (size_t i = 0; i < g_wifi_scan_count; ++i) {
+      const WifiScanResult& ap = g_wifi_scan_results[i];
+      String line = wigle_csv_escape(ap.bssid);
+      line += "," + wigle_csv_escape(ap.ssid);
+      line += "," + wigle_csv_escape(wigle_wifi_capabilities(ap.encryption));
+      line += "," + wigle_csv_escape(timestamp);
+      line += "," + String(static_cast<long>(ap.channel));
+      const int32_t frequency = wifi_frequency_mhz(ap.channel);
+      line += "," + String(static_cast<long>(frequency));
+      line += "," + String(static_cast<long>(ap.rssi));
+      line += "," + latitude;
+      line += "," + longitude;
+      line += "," + altitude;
+      line += "," + accuracy;
+      line += ",,";
+      line += ",WIFI";
+      if (!append_wigle_line(line)) {
+        return;
+      }
+      ++g_logged_wigle_count;
+    }
+    g_needs_redraw = true;
+  }
+#endif
 #else
   g_wifi_scan_count = 0;
 #endif
@@ -354,83 +516,72 @@ void refresh_wireless_scans() {
 #endif
 }
 
-String build_jsonl_snapshot() {
-  String line = "{";
-  line += "\"time\":" + json_string(format_log_timestamp());
-  line += ",\"millis\":" + String(millis());
-  line += ",\"app_mode\":" + json_string(app_mode_name(g_app_mode));
-  line += ",\"display_mode\":" + json_string(mode_name(g_display_mode));
-  line += ",\"battery\":{\"percent\":" + String(M5.Power.getBatteryLevel()) + "}";
-  line += ",\"device\":{\"heap_free\":" + String(ESP.getFreeHeap()) + ",\"psram_free\":" + String(ESP.getFreePsram()) + "}";
-  line += ",\"gps\":{";
-  line += "\"fix\":" + String(has_gps_fix() ? "true" : "false");
-  line += ",\"mode\":" + json_string(g_gnss_mode);
-  line += ",\"version\":" + json_string(g_gnss_version);
-  line += ",\"lat\":" + (gps.location.isValid() ? String(gps.location.lat(), 6) : "null");
-  line += ",\"lon\":" + (gps.location.isValid() ? String(gps.location.lng(), 6) : "null");
-  line += ",\"alt_m\":" + (gps.altitude.isValid() ? String(gps.altitude.meters(), 1) : "null");
-  line += ",\"speed_kmh\":" + (gps.speed.isValid() ? String(gps.speed.kmph(), 1) : "null");
-  line += ",\"course_deg\":" + (gps.course.isValid() ? String(gps.course.deg(), 1) : "null");
-  line += ",\"satellites_used\":" + (gps.satellites.isValid() ? String(gps.satellites.value()) : "null");
-  line += ",\"satellites_visible\":" + String(visible_tracked_satellite_count());
-  line += ",\"hdop\":" + (gps.hdop.isValid() ? String(gps.hdop.hdop(), 1) : "null");
-  line += ",\"utc\":" + json_string(format_date_time());
-  line += "}";
-  line += ",\"lora\":{";
-  line += "\"status\":" + json_string(g_radio_ready ? g_lora_status : "OFF");
-  line += ",\"count\":" + String(g_logged_lora_count);
-  line += ",\"last_message\":" + json_string(g_last_lora_message);
-  line += ",\"last_time\":" + json_string(g_last_lora_timestamp);
-  line += ",\"last_rssi\":" + String(g_last_lora_rssi, 1);
-  line += ",\"last_snr\":" + String(g_last_lora_snr, 1);
-  line += "}";
-#if BUILD_ENABLE_WIFI_SCAN
-  line += ",\"wifi\":[";
-  for (size_t i = 0; i < g_wifi_scan_count; ++i) {
-    if (i > 0) {
-      line += ",";
-    }
-    line += "{";
-    line += "\"ssid\":" + json_string(g_wifi_scan_results[i].ssid);
-    line += ",\"bssid\":" + json_string(g_wifi_scan_results[i].bssid);
-    line += ",\"rssi\":" + String(g_wifi_scan_results[i].rssi);
-    line += ",\"channel\":" + String(g_wifi_scan_results[i].channel);
-    line += ",\"auth\":" + json_string(wifi_auth_name(g_wifi_scan_results[i].encryption));
-    line += "}";
+#if BUILD_ENABLE_BLE_SCAN
+uint16_t bluetooth_manufacturer_id(const uint8_t* adv_data, uint8_t adv_len, bool* valid) {
+  if (valid) {
+    *valid = false;
   }
-  line += "]";
-#endif
-  line += ",\"bluetooth\":{";
-  line += "\"mac\":" + json_string(bluetooth_mac_address());
-  line += ",\"supported\":" + String(BUILD_ENABLE_BLE_SCAN ? "true" : "false");
-  line += "}";
-  line += "}";
-  return line;
+  if (!adv_data || adv_len == 0) {
+    return 0;
+  }
+
+  size_t offset = 0;
+  while (offset + 1 < adv_len) {
+    const uint8_t field_len = adv_data[offset];
+    if (field_len == 0 || offset + 1 + field_len > adv_len) {
+      break;
+    }
+    const uint8_t field_type = adv_data[offset + 1];
+    if (field_type == ESP_BLE_AD_MANUFACTURER_SPECIFIC_TYPE && field_len >= 3) {
+      if (valid) {
+        *valid = true;
+      }
+      return static_cast<uint16_t>(adv_data[offset + 2]) |
+             (static_cast<uint16_t>(adv_data[offset + 3]) << 8);
+    }
+    offset += field_len + 1;
+  }
+  return 0;
 }
 
-void append_jsonl_snapshot_if_needed() {
-#if BUILD_ENABLE_JSONL_LOG
-  const uint32_t now = millis();
-  if (now - g_last_json_snapshot_ms < harvest_log_config::SNAPSHOT_INTERVAL_MS) {
-    return;
-  }
-  if (!open_jsonl_log_file_if_needed()) {
+void append_bluetooth_scan_results_to_wigle() {
+#if BUILD_ENABLE_WIGLE_LOG
+  if (g_bluetooth_scan_count == 0 || !wigle_has_observation_fix() || !open_wigle_log_file_if_needed()) {
     return;
   }
 
-  const String line = build_jsonl_snapshot();
-  const size_t expected_bytes = line.length() + 2;
-  size_t written_bytes = g_jsonl_log_file.print(line);
-  written_bytes += g_jsonl_log_file.print("\r\n");
-  g_jsonl_log_file.flush();
+  const String timestamp = wigle_timestamp();
+  const String latitude = wigle_latitude();
+  const String longitude = wigle_longitude();
+  const String altitude = wigle_altitude_meters();
+  const String accuracy = wigle_accuracy_meters();
 
-  if (written_bytes < expected_bytes) {
-    mark_sd_unavailable();
-    return;
+  for (size_t i = 0; i < g_bluetooth_scan_count; ++i) {
+    const BluetoothScanResult& device = g_bluetooth_scan_results[i];
+    String line = wigle_csv_escape(device.address);
+    line += "," + wigle_csv_escape(device.name);
+    line += "," + wigle_csv_escape("Misc [LE]");
+    line += "," + wigle_csv_escape(timestamp);
+    line += ",0,";
+    line += "," + String(static_cast<long>(device.rssi));
+    line += "," + latitude;
+    line += "," + longitude;
+    line += "," + altitude;
+    line += "," + accuracy;
+    line += ",";
+    if (device.has_manufacturer_id) {
+      line += "," + String(static_cast<unsigned long>(device.manufacturer_id));
+    } else {
+      line += ",";
+    }
+    line += ",BLE";
+    if (!append_wigle_line(line)) {
+      return;
+    }
+    ++g_logged_wigle_count;
   }
 
-  g_last_json_snapshot_ms = now;
-  ++g_logged_json_count;
   g_needs_redraw = true;
 #endif
 }
+#endif

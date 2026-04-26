@@ -323,13 +323,13 @@ void draw_text_mode() {
   lines[line_count++] = "Cnt : G" + String(static_cast<unsigned long>(g_logged_sentence_count)) + " L" +
                         String(static_cast<unsigned long>(g_logged_lora_count)) + " B:" +
                         String(g_beep_enabled ? "ON" : "OFF");
-  lines[line_count++] = "JCnt: " + String(static_cast<unsigned long>(g_logged_json_count));
+  lines[line_count++] = "WCnt: " + String(static_cast<unsigned long>(g_logged_wigle_count));
   lines[line_count++] = "Mode: " + g_gnss_mode;
   lines[line_count++] = "Ver : " + fit_text(g_gnss_version, 24);
   lines[line_count++] = "WiFi: " + String(g_wifi_scan_count) + " BT:OK";
   lines[line_count++] = "GFil: " + log_path_label(g_gps_log_path);
   lines[line_count++] = "LFil: " + log_path_label(g_lora_log_path);
-  lines[line_count++] = "JFil: " + log_path_label(g_jsonl_log_path);
+  lines[line_count++] = "WFil: " + log_path_label(g_wigle_log_path);
 
   const size_t max_scroll = max_text_scroll_offset(line_count);
   if (g_text_scroll_offset > max_scroll) {
@@ -854,8 +854,6 @@ void loop() {
 
     update_status();
     refresh_wireless_scans();
-    append_jsonl_snapshot_if_needed();
-
     if (M5Cardputer.BtnA.wasClicked()) {
       g_display_mode = next_mode(g_display_mode);
       g_text_scroll_offset = 0;
