@@ -8,6 +8,7 @@ Cardputer-ADV 向けの Arduino デモ集です。Arduino IDE で開いてその
 | --- | --- | --- |
 | `KeyboardInputDemo` | 日本語 IME 風変換入力と SD 保存 / 読込に対応したテキストエディター | `M5Cardputer`, `SD`, `SPI` |
 | `MandelbrotDemo` | マンデルブロ集合の描画とキーボード操作によるパン / ズーム | `M5Cardputer` |
+| `MicSpectrumDemo` | 内蔵マイク入力をフーリエ変換してスペクトル表示するデモ | `M5Cardputer` |
 | `RouletteRecorderDemo` | ルーレットの出目をセッション単位で CSV 記録し、ヒートマップや履歴で可視化するツール | `M5Cardputer`, `SD`, `SPI` |
 | `MinecraftDemo` | `Minecraft` 風デモ | `M5Cardputer` |
 | `OutRunDemo` | `OutRun` 風デモ | `M5Cardputer` |
