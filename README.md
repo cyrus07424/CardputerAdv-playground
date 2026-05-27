@@ -21,6 +21,7 @@ Cardputer-ADV 向けの Arduino デモ集です。Arduino IDE で開いてその
 | `GhostmanDemo` | ゴースト側を操作する追跡アクション | `M5Cardputer` |
 | `TopDownShooterDemo` | 見下ろし型シューティングデモ | `M5Cardputer` |
 | `DanmakuDemo` | 弾幕シューティングデモ | `M5Cardputer` |
+| `LifeGameDemo` | ライフゲームデモ | `M5Cardputer` |
 | `Imu3dDemo` | 内蔵加速度 / ジャイロを使った 3D 姿勢ビジュアライズ | `M5Cardputer` |
 | `LevelDemo` | 黒系キーボード風 UI の 2 軸水平器 | `M5Cardputer` |
 | `PxtonePlayerDemo` | SD カード上の `*.ptcop` / `*.pttune` を選んで再生するpxtone プレイヤー | `M5Cardputer`, `SD`, `SPI` |
